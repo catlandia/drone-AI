@@ -8,7 +8,8 @@ The environment supports multiple task types:
 - Hover: Maintain a stable position
 - Waypoint: Navigate to target positions
 - Trajectory: Follow a predefined path
-- Acrobatic: Perform specific maneuvers
+- Velocity: Track a target velocity
+- Delivery: Pick up package and drop at target location
 """
 
 import numpy as np
@@ -17,7 +18,10 @@ from gymnasium import spaces
 from typing import Optional, Dict, Any, Tuple, List
 from enum import Enum
 
-from drone_ai.simulation import DroneSimulation, DroneConfig, DroneState
+from drone_ai.simulation import (
+    DroneSimulation, DroneConfig, DroneState,
+    PackageConfig, PackageState, PackageStatus
+)
 
 
 class TaskType(Enum):
@@ -26,24 +30,31 @@ class TaskType(Enum):
     WAYPOINT = "waypoint"
     TRAJECTORY = "trajectory"
     VELOCITY = "velocity"
+    DELIVERY = "delivery"  # Package pickup and drop mission
 
 
 class DroneEnv(gym.Env):
     """
     Gymnasium environment for drone flight control.
 
-    Observation Space (18 dimensions):
+    Observation Space (19-26 dimensions depending on task):
+        Base (19 dims):
         - Position (3): x, y, z in world frame
         - Velocity (3): vx, vy, vz in world frame
         - Orientation (3): roll, pitch, yaw angles
         - Angular velocity (3): p, q, r in body frame
         - Target position (3): relative target in world frame
-        - Previous action (3): last commanded attitude + thrust
+        - Previous action (4): last motor commands
 
-    Action Space (4 dimensions):
-        - Motor commands: 4 normalized motor speeds [0, 1]
-        OR
-        - Attitude control: [thrust, roll_cmd, pitch_cmd, yaw_rate_cmd]
+        Delivery task adds (7 dims):
+        - Package status (1): 0=waiting, 1=attached, 2=dropping, 3=delivered, 4=missed
+        - Has package (1): binary flag
+        - Pickup position relative (3): relative to drone
+        - Dropzone position relative (3): relative to drone
+
+    Action Space:
+        Standard tasks (4 dims): Motor commands [0, 1]
+        Delivery task (5 dims): Motor commands [0, 1] + drop signal [0, 1]
 
     Rewards:
         - Position tracking reward
@@ -51,6 +62,7 @@ class DroneEnv(gym.Env):
         - Attitude stability reward
         - Action smoothness reward
         - Crash penalty
+        - Delivery task: pickup bonus, delivery accuracy bonus
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
@@ -62,7 +74,8 @@ class DroneEnv(gym.Env):
         render_mode: Optional[str] = None,
         domain_randomization: bool = False,
         difficulty: float = 0.5,
-        config: Optional[DroneConfig] = None
+        config: Optional[DroneConfig] = None,
+        package_config: Optional[PackageConfig] = None
     ):
         """
         Initialize the drone environment.
@@ -74,6 +87,7 @@ class DroneEnv(gym.Env):
             domain_randomization: Enable randomization for sim-to-real
             difficulty: Task difficulty [0, 1]
             config: Drone configuration parameters
+            package_config: Package configuration for delivery task
         """
         super().__init__()
 
@@ -85,19 +99,34 @@ class DroneEnv(gym.Env):
 
         # Initialize simulation
         self.base_config = config or DroneConfig()
-        self.sim = DroneSimulation(self.base_config)
+        self.package_config = package_config or PackageConfig()
+        self.sim = DroneSimulation(self.base_config, self.package_config)
 
-        # Define action space: 4 motor commands normalized to [0, 1]
-        self.action_space = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(4,),
-            dtype=np.float32
-        )
+        # Define action space based on task
+        if task == TaskType.DELIVERY:
+            # 4 motor commands + 1 drop signal
+            self.action_space = spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=(5,),
+                dtype=np.float32
+            )
+        else:
+            # 4 motor commands normalized to [0, 1]
+            self.action_space = spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=(4,),
+                dtype=np.float32
+            )
 
-        # Define observation space
-        # [position(3), velocity(3), euler(3), angular_vel(3), target_rel(3), prev_action(4)]
-        obs_dim = 19
+        # Define observation space based on task
+        # Base: [position(3), velocity(3), euler(3), angular_vel(3), target_rel(3), prev_action(4/5)]
+        if task == TaskType.DELIVERY:
+            # Add: package_status(1), has_package(1), pickup_rel(3), dropzone_rel(3)
+            obs_dim = 19 + 1 + 8  # 28 total (prev_action is 5 for delivery)
+        else:
+            obs_dim = 19
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -111,9 +140,15 @@ class DroneEnv(gym.Env):
         self.waypoints: List[np.ndarray] = []
         self.current_waypoint_idx = 0
 
+        # Delivery task parameters
+        self.pickup_position = np.zeros(3)
+        self.dropzone_position = np.zeros(3)
+        self.package_picked_up = False
+        self.delivery_phase = "pickup"  # "pickup", "deliver", "drop", "done"
+
         # Episode state
         self.step_count = 0
-        self.prev_action = np.zeros(4)
+        self.prev_action = np.zeros(5 if task == TaskType.DELIVERY else 4)
         self.episode_reward = 0.0
         self.position_history: List[np.ndarray] = []
 
@@ -126,7 +161,13 @@ class DroneEnv(gym.Env):
             'action_smoothness': 0.1,
             'alive': 0.1,
             'crash': -10.0,
-            'success': 5.0
+            'success': 5.0,
+            # Delivery-specific rewards
+            'pickup': 10.0,          # Bonus for picking up package
+            'delivery': 20.0,        # Bonus for successful delivery
+            'accuracy': 10.0,        # Bonus scaled by delivery accuracy
+            'drop_penalty': -5.0,    # Penalty for dropping at wrong time
+            'missed': -15.0,         # Penalty for missing drop zone
         }
 
         # Visualization
@@ -144,25 +185,41 @@ class DroneEnv(gym.Env):
         if self.domain_randomization:
             self._apply_domain_randomization()
         else:
-            self.sim = DroneSimulation(self.base_config)
+            self.sim = DroneSimulation(self.base_config, self.package_config)
+
+        # Set up task-specific targets first (needed for delivery task reset)
+        self._setup_task()
 
         # Reset drone state with optional randomization
         init_position = self._get_initial_position()
         init_velocity = self._get_initial_velocity()
         init_orientation = self._get_initial_orientation()
 
-        self.sim.reset(
-            position=init_position,
-            velocity=init_velocity,
-            orientation=init_orientation
-        )
-
-        # Set up task-specific targets
-        self._setup_task()
+        # Reset simulation with package info for delivery task
+        if self.task == TaskType.DELIVERY:
+            self.sim.reset(
+                position=init_position,
+                velocity=init_velocity,
+                orientation=init_orientation,
+                package_pickup=self.pickup_position,
+                package_dropzone=self.dropzone_position
+            )
+            self.package_picked_up = False
+            self.delivery_phase = "pickup"
+        else:
+            self.sim.reset(
+                position=init_position,
+                velocity=init_velocity,
+                orientation=init_orientation
+            )
 
         # Reset episode state
         self.step_count = 0
-        self.prev_action = self.sim.compute_hover_action()
+        hover_action = self.sim.compute_hover_action()
+        if self.task == TaskType.DELIVERY:
+            self.prev_action = np.concatenate([hover_action, [0.0]])  # Add drop signal
+        else:
+            self.prev_action = hover_action
         self.episode_reward = 0.0
         self.position_history = [self.sim.state.position.copy()]
 
@@ -178,8 +235,13 @@ class DroneEnv(gym.Env):
         # Clip action to valid range
         action = np.clip(action, 0, 1).astype(np.float32)
 
-        # Step the simulation
-        self.sim.step(action)
+        # Handle delivery task with drop signal
+        if self.task == TaskType.DELIVERY:
+            motor_action = action[:4]
+            drop_signal = action[4] > 0.5  # Threshold for drop command
+            self.sim.step(motor_action, drop_package=drop_signal)
+        else:
+            self.sim.step(action)
 
         # Record position for trajectory visualization
         self.position_history.append(self.sim.state.position.copy())
@@ -225,14 +287,48 @@ class DroneEnv(gym.Env):
         # Previous action
         prev_action = self.prev_action
 
-        observation = np.concatenate([
+        # Base observation
+        base_obs = [
             position,
             velocity,
             euler,
             angular_velocity,
             target_rel,
             prev_action
-        ]).astype(np.float32)
+        ]
+
+        # Add delivery-specific observations
+        if self.task == TaskType.DELIVERY:
+            pkg = self.sim.get_package_state()
+            if pkg is not None:
+                # Package status as normalized value (0-4 -> 0-1)
+                status_map = {
+                    PackageStatus.WAITING: 0.0,
+                    PackageStatus.ATTACHED: 0.25,
+                    PackageStatus.DROPPING: 0.5,
+                    PackageStatus.DELIVERED: 0.75,
+                    PackageStatus.MISSED: 1.0
+                }
+                pkg_status = np.array([status_map.get(pkg.status, 0.0)])
+
+                # Has package flag
+                has_package = np.array([1.0 if self.sim.has_package() else 0.0])
+
+                # Relative positions to pickup and dropzone
+                pickup_rel = (pkg.pickup_position - state.position) / 5.0
+                dropzone_rel = (pkg.dropzone_position - state.position) / 5.0
+
+                base_obs.extend([pkg_status, has_package, pickup_rel, dropzone_rel])
+            else:
+                # No package, add zeros
+                base_obs.extend([
+                    np.zeros(1),  # status
+                    np.zeros(1),  # has_package
+                    np.zeros(3),  # pickup_rel
+                    np.zeros(3),  # dropzone_rel
+                ])
+
+        observation = np.concatenate(base_obs).astype(np.float32)
 
         return observation
 
@@ -256,7 +352,9 @@ class DroneEnv(gym.Env):
         ang_vel_penalty = -weights['angular_velocity'] * np.linalg.norm(state.angular_velocity) ** 2
 
         # Action smoothness (penalize jerky control)
-        action_diff = np.linalg.norm(action - self.prev_action)
+        motor_action = action[:4] if self.task == TaskType.DELIVERY else action
+        prev_motor = self.prev_action[:4] if self.task == TaskType.DELIVERY else self.prev_action
+        action_diff = np.linalg.norm(motor_action - prev_motor)
         smoothness_penalty = -weights['action_smoothness'] * action_diff ** 2
 
         # Alive bonus
@@ -272,6 +370,11 @@ class DroneEnv(gym.Env):
         if self.sim.is_crashed():
             crash_penalty = weights['crash']
 
+        # Delivery-specific rewards
+        delivery_reward = 0.0
+        if self.task == TaskType.DELIVERY:
+            delivery_reward = self._compute_delivery_reward(action)
+
         total_reward = (
             pos_reward +
             vel_penalty +
@@ -280,10 +383,56 @@ class DroneEnv(gym.Env):
             smoothness_penalty +
             alive_bonus +
             success_bonus +
-            crash_penalty
+            crash_penalty +
+            delivery_reward
         )
 
         return float(total_reward)
+
+    def _compute_delivery_reward(self, action: np.ndarray) -> float:
+        """Compute delivery-specific rewards."""
+        weights = self.reward_weights
+        reward = 0.0
+
+        pkg = self.sim.get_package_state()
+        if pkg is None:
+            return 0.0
+
+        # Pickup bonus - one-time reward when package is picked up
+        if pkg.status == PackageStatus.ATTACHED and not self.package_picked_up:
+            reward += weights['pickup']
+            self.package_picked_up = True
+            self.delivery_phase = "deliver"
+
+        # Successful delivery bonus
+        if pkg.status == PackageStatus.DELIVERED:
+            if self.delivery_phase != "done":
+                reward += weights['delivery']
+                # Accuracy bonus (closer to center = more reward)
+                accuracy = self.sim.get_delivery_accuracy()
+                if accuracy is not None:
+                    # Max bonus at center, decreasing with distance
+                    accuracy_bonus = weights['accuracy'] * max(0, 1 - accuracy / self.package_config.drop_zone_radius)
+                    reward += accuracy_bonus
+                self.delivery_phase = "done"
+
+        # Missed delivery penalty
+        if pkg.status == PackageStatus.MISSED:
+            if self.delivery_phase != "done":
+                reward += weights['missed']
+                self.delivery_phase = "done"
+
+        # Penalty for dropping when not over drop zone
+        drop_signal = action[4] > 0.5 if len(action) > 4 else False
+        if drop_signal and pkg.status == PackageStatus.ATTACHED:
+            # Check if we're close to the drop zone
+            dist_to_dropzone = np.linalg.norm(
+                self.sim.state.position[:2] - pkg.dropzone_position[:2]
+            )
+            if dist_to_dropzone > self.package_config.drop_zone_radius * 2:
+                reward += weights['drop_penalty']
+
+        return reward
 
     def _check_terminated(self) -> bool:
         """Check if episode should terminate."""
@@ -295,6 +444,11 @@ class DroneEnv(gym.Env):
         position = self.sim.state.position
         if np.any(np.abs(position[:2]) > 10) or position[2] > 20:
             return True
+
+        # Delivery task termination
+        if self.task == TaskType.DELIVERY:
+            if self.sim.is_package_delivered() or self.sim.is_package_missed():
+                return True
 
         return False
 
@@ -325,6 +479,30 @@ class DroneEnv(gym.Env):
             ])
             self.target_position = self.sim.state.position.copy()
 
+        elif self.task == TaskType.DELIVERY:
+            # Set up delivery mission
+            # Pickup location (package starts here, on the ground)
+            pickup_range = 1.0 + self.difficulty * 2.0  # 1-3m from start
+            pickup_angle = self.np_random.uniform(0, 2 * np.pi)
+            self.pickup_position = np.array([
+                pickup_range * np.cos(pickup_angle),
+                pickup_range * np.sin(pickup_angle),
+                0.0  # On ground
+            ])
+
+            # Drop zone location (opposite side, further away)
+            dropzone_range = 2.0 + self.difficulty * 3.0  # 2-5m from start
+            dropzone_angle = pickup_angle + np.pi + self.np_random.uniform(-0.5, 0.5)
+            self.dropzone_position = np.array([
+                dropzone_range * np.cos(dropzone_angle),
+                dropzone_range * np.sin(dropzone_angle),
+                0.0  # On ground
+            ])
+
+            # Initial target is pickup location (fly there first)
+            self.target_position = self.pickup_position.copy()
+            self.target_position[2] = 0.5  # Hover above pickup point
+
     def _update_task(self):
         """Update task state (e.g., advance to next waypoint)."""
         if self.task == TaskType.WAYPOINT:
@@ -338,6 +516,24 @@ class DroneEnv(gym.Env):
         elif self.task == TaskType.VELOCITY:
             # Update target position based on target velocity
             self.target_position += self.target_velocity * self.base_config.dt
+
+        elif self.task == TaskType.DELIVERY:
+            # Update target based on delivery phase
+            pkg = self.sim.get_package_state()
+            if pkg is not None:
+                if self.delivery_phase == "pickup":
+                    # Target is above pickup point
+                    self.target_position = self.pickup_position.copy()
+                    self.target_position[2] = 0.3  # Low altitude for pickup
+
+                elif self.delivery_phase == "deliver":
+                    # Package picked up, target is above drop zone
+                    self.target_position = self.dropzone_position.copy()
+                    self.target_position[2] = 1.5  # Higher for drop
+
+                elif self.delivery_phase == "done":
+                    # Mission complete, hover at current position
+                    pass
 
     def _random_target(self) -> np.ndarray:
         """Generate a random target position."""
@@ -395,12 +591,12 @@ class DroneEnv(gym.Env):
         # Randomize motor response time (±25%)
         config.motor_time_constant = self.base_config.motor_time_constant * self.np_random.uniform(0.75, 1.25)
 
-        self.sim = DroneSimulation(config)
+        self.sim = DroneSimulation(config, self.package_config)
 
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info about current state."""
         state = self.sim.state
-        return {
+        info = {
             'position': state.position.copy(),
             'velocity': state.velocity.copy(),
             'euler_angles': state.get_euler_angles(),
@@ -411,6 +607,23 @@ class DroneEnv(gym.Env):
             'episode_reward': self.episode_reward,
             'crashed': self.sim.is_crashed(),
         }
+
+        # Add delivery-specific info
+        if self.task == TaskType.DELIVERY:
+            pkg = self.sim.get_package_state()
+            info['delivery_phase'] = self.delivery_phase
+            info['pickup_position'] = self.pickup_position.copy()
+            info['dropzone_position'] = self.dropzone_position.copy()
+
+            if pkg is not None:
+                info['package_status'] = pkg.status.value
+                info['package_position'] = pkg.position.copy()
+                info['has_package'] = self.sim.has_package()
+                info['package_delivered'] = self.sim.is_package_delivered()
+                info['package_missed'] = self.sim.is_package_missed()
+                info['delivery_accuracy'] = self.sim.get_delivery_accuracy()
+
+        return info
 
     def render(self):
         """Render the environment."""
@@ -473,4 +686,18 @@ def register_envs():
         entry_point="drone_ai.environment:DroneEnv",
         kwargs={"task": TaskType.WAYPOINT, "difficulty": 0.5},
         max_episode_steps=2000
+    )
+
+    gym.register(
+        id="DroneDelivery-v0",
+        entry_point="drone_ai.environment:DroneEnv",
+        kwargs={"task": TaskType.DELIVERY, "difficulty": 0.3},
+        max_episode_steps=2000
+    )
+
+    gym.register(
+        id="DroneDelivery-v1",
+        entry_point="drone_ai.environment:DroneEnv",
+        kwargs={"task": TaskType.DELIVERY, "difficulty": 0.7, "domain_randomization": True},
+        max_episode_steps=3000
     )

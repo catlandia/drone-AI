@@ -23,7 +23,7 @@ try:
 except ImportError:
     PYGAME_AVAILABLE = False
 
-from drone_ai.simulation import DroneState
+from drone_ai.simulation import DroneState, PackageState, PackageStatus
 
 
 @dataclass
@@ -62,6 +62,12 @@ class DroneRenderer:
     TRAJECTORY = (100, 200, 255)
     TEXT_COLOR = (200, 200, 200)
     GROUND = (40, 40, 50)
+    # Delivery task colors
+    PACKAGE = (255, 150, 50)       # Orange package
+    PACKAGE_ATTACHED = (50, 255, 50)  # Green when attached
+    PICKUP_ZONE = (100, 255, 255)  # Cyan pickup zone
+    DROPZONE = (255, 100, 255)     # Magenta drop zone
+    DROPZONE_SUCCESS = (50, 255, 50)  # Green on successful delivery
 
     def __init__(
         self,
@@ -103,9 +109,19 @@ class DroneRenderer:
         self,
         state: DroneState,
         target: np.ndarray,
-        trajectory: List[np.ndarray]
+        trajectory: List[np.ndarray],
+        package: Optional[PackageState] = None,
+        dropzone_radius: float = 0.3
     ):
-        """Render the current state."""
+        """Render the current state.
+
+        Args:
+            state: Current drone state
+            target: Target position
+            trajectory: List of past positions
+            package: Optional package state for delivery task
+            dropzone_radius: Radius of the drop zone
+        """
         # Handle pygame events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -125,13 +141,19 @@ class DroneRenderer:
 
         # Render 3D scene
         self._render_ground()
+
+        # Render delivery elements if package exists
+        if package is not None:
+            self._render_delivery_zones(package, dropzone_radius)
+            self._render_package(package, state)
+
         self._render_trajectory(trajectory)
         self._render_target(target)
         self._render_drone(state)
 
         # Render HUD
         if self.show_hud:
-            self._render_hud(state, target)
+            self._render_hud(state, target, package)
 
         # Update display
         if not self.headless:
@@ -142,10 +164,12 @@ class DroneRenderer:
         self,
         state: DroneState,
         target: np.ndarray,
-        trajectory: List[np.ndarray]
+        trajectory: List[np.ndarray],
+        package: Optional[PackageState] = None,
+        dropzone_radius: float = 0.3
     ) -> np.ndarray:
         """Render and return as numpy array."""
-        self.render(state, target, trajectory)
+        self.render(state, target, trajectory, package, dropzone_radius)
         return pygame.surfarray.array3d(self.screen).transpose(1, 0, 2)
 
     def _handle_input(self, event):
@@ -316,11 +340,109 @@ class DroneRenderer:
             if forward_screen:
                 pygame.draw.line(self.screen, (255, 255, 100), center_screen, forward_screen, 2)
 
-    def _render_hud(self, state: DroneState, target: np.ndarray):
+    def _render_delivery_zones(self, package: PackageState, dropzone_radius: float):
+        """Render pickup and drop zones for delivery task."""
+        # Pickup zone (cyan circle on ground)
+        pickup_pos = package.pickup_position.copy()
+        pickup_pos[2] = 0.01  # Slightly above ground to be visible
+
+        # Draw pickup zone as a circle
+        n_segments = 16
+        pickup_points = []
+        for i in range(n_segments + 1):
+            angle = 2 * np.pi * i / n_segments
+            point = pickup_pos + np.array([
+                0.2 * np.cos(angle),
+                0.2 * np.sin(angle),
+                0
+            ])
+            screen_point = self._world_to_screen(point)
+            if screen_point:
+                pickup_points.append(screen_point)
+
+        if len(pickup_points) >= 2:
+            # Draw filled if package is waiting, outline otherwise
+            if package.status == PackageStatus.WAITING:
+                pygame.draw.polygon(self.screen, self.PICKUP_ZONE, pickup_points)
+            else:
+                pygame.draw.lines(self.screen, self.PICKUP_ZONE, True, pickup_points, 2)
+
+        # Drop zone (magenta/green circle on ground)
+        dropzone_pos = package.dropzone_position.copy()
+        dropzone_pos[2] = 0.01
+
+        # Determine drop zone color based on status
+        if package.status == PackageStatus.DELIVERED:
+            zone_color = self.DROPZONE_SUCCESS
+        else:
+            zone_color = self.DROPZONE
+
+        # Draw drop zone circle
+        dropzone_points = []
+        for i in range(n_segments + 1):
+            angle = 2 * np.pi * i / n_segments
+            point = dropzone_pos + np.array([
+                dropzone_radius * np.cos(angle),
+                dropzone_radius * np.sin(angle),
+                0
+            ])
+            screen_point = self._world_to_screen(point)
+            if screen_point:
+                dropzone_points.append(screen_point)
+
+        if len(dropzone_points) >= 2:
+            pygame.draw.lines(self.screen, zone_color, True, dropzone_points, 3)
+
+            # Draw inner target
+            inner_points = []
+            for i in range(n_segments + 1):
+                angle = 2 * np.pi * i / n_segments
+                point = dropzone_pos + np.array([
+                    dropzone_radius * 0.3 * np.cos(angle),
+                    dropzone_radius * 0.3 * np.sin(angle),
+                    0
+                ])
+                screen_point = self._world_to_screen(point)
+                if screen_point:
+                    inner_points.append(screen_point)
+
+            if len(inner_points) >= 2:
+                pygame.draw.lines(self.screen, zone_color, True, inner_points, 2)
+
+    def _render_package(self, package: PackageState, drone_state: DroneState):
+        """Render the package."""
+        # Determine package position and color based on status
+        if package.status == PackageStatus.WAITING:
+            pkg_pos = package.pickup_position.copy()
+            pkg_pos[2] = 0.05  # Slightly above ground
+            color = self.PACKAGE
+        elif package.status == PackageStatus.ATTACHED:
+            pkg_pos = drone_state.position.copy()
+            pkg_pos[2] -= 0.1  # Below drone
+            color = self.PACKAGE_ATTACHED
+        elif package.status == PackageStatus.DROPPING:
+            pkg_pos = package.position.copy()
+            color = self.PACKAGE
+        elif package.status in [PackageStatus.DELIVERED, PackageStatus.MISSED]:
+            pkg_pos = package.position.copy()
+            color = self.DROPZONE_SUCCESS if package.status == PackageStatus.DELIVERED else (255, 50, 50)
+        else:
+            return
+
+        screen_pos = self._world_to_screen(pkg_pos)
+        if screen_pos:
+            # Draw package as a small square
+            size = 8
+            pygame.draw.rect(self.screen, color,
+                           (screen_pos[0] - size//2, screen_pos[1] - size//2, size, size))
+            pygame.draw.rect(self.screen, (255, 255, 255),
+                           (screen_pos[0] - size//2, screen_pos[1] - size//2, size, size), 1)
+
+    def _render_hud(self, state: DroneState, target: np.ndarray, package: Optional[PackageState] = None):
         """Render heads-up display."""
-        # Background panel
+        # Background panel - taller if showing package info
         panel_width = 200
-        panel_height = 180
+        panel_height = 230 if package is not None else 180
         panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
         panel_surface.fill((0, 0, 0, 150))
         self.screen.blit(panel_surface, (10, 10))
@@ -356,6 +478,26 @@ class DroneRenderer:
         motor_text = f"Motors: {state.motor_speeds[0]:.0f} rpm"
         text = self.font.render(motor_text, True, self.TEXT_COLOR)
         self.screen.blit(text, (20, 150))
+
+        # Package status (if delivery task)
+        if package is not None:
+            status_colors = {
+                PackageStatus.WAITING: self.PICKUP_ZONE,
+                PackageStatus.ATTACHED: self.PACKAGE_ATTACHED,
+                PackageStatus.DROPPING: self.PACKAGE,
+                PackageStatus.DELIVERED: self.DROPZONE_SUCCESS,
+                PackageStatus.MISSED: (255, 50, 50)
+            }
+            status_color = status_colors.get(package.status, self.TEXT_COLOR)
+            pkg_text = f"Package: {package.status.value}"
+            text = self.font.render(pkg_text, True, status_color)
+            self.screen.blit(text, (20, 175))
+
+            # Distance to drop zone
+            dropzone_dist = np.linalg.norm(state.position[:2] - package.dropzone_position[:2])
+            dz_text = f"Dropzone: {dropzone_dist:.2f} m"
+            text = self.font.render(dz_text, True, self.DROPZONE)
+            self.screen.blit(text, (20, 200))
 
         # Controls help (bottom of screen)
         help_text = "Arrow keys: rotate | +/-: zoom | Space: follow | T: trajectory | H: HUD"

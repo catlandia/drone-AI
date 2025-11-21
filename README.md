@@ -108,6 +108,21 @@ Navigate through a series of target positions.
 python -m drone_ai.train --task waypoint --difficulty 0.5
 ```
 
+### Package Delivery (NEW!)
+Pick up a package and deliver it to a drop zone with precision.
+```bash
+# Train delivery task
+python -m drone_ai.train --task delivery --difficulty 0.3 --total-timesteps 2000000
+
+# With curriculum learning for better results
+python -m drone_ai.train --task delivery --curriculum --domain-randomization
+```
+
+The delivery task has three phases:
+1. **Pickup**: Fly to the cyan pickup zone and descend to grab the package
+2. **Transport**: Carry the package to the magenta drop zone
+3. **Drop**: Release the package over the target (accuracy is rewarded!)
+
 ### Velocity Tracking
 Maintain a target velocity (useful for trajectory following).
 ```bash

@@ -31,7 +31,7 @@ def parse_args():
 
     # Environment settings
     parser.add_argument("--task", type=str, default="hover",
-                       choices=["hover", "waypoint", "trajectory", "velocity"],
+                       choices=["hover", "waypoint", "trajectory", "velocity", "delivery"],
                        help="Training task")
     parser.add_argument("--difficulty", type=float, default=0.3,
                        help="Task difficulty [0, 1]")

@@ -7,6 +7,7 @@ A realistic quadcopter physics simulation that models:
 - Aerodynamic drag
 - Gravity effects
 - Ground collision detection
+- Package carrying and dropping mechanics
 
 This simulation is designed for sim-to-real transfer, using realistic
 parameters that can be tuned to match real drone hardware.
@@ -15,7 +16,17 @@ parameters that can be tuned to match real drone hardware.
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Tuple, Optional
+from enum import Enum
 import math
+
+
+class PackageStatus(Enum):
+    """Status of the package in delivery missions."""
+    WAITING = "waiting"      # At pickup location, not yet grabbed
+    ATTACHED = "attached"    # Attached to drone
+    DROPPING = "dropping"    # In free fall after release
+    DELIVERED = "delivered"  # Successfully landed in drop zone
+    MISSED = "missed"        # Landed outside drop zone
 
 
 @dataclass
@@ -53,6 +64,35 @@ class DroneConfig:
 
     # Simulation
     dt: float = 0.01  # Simulation timestep (seconds)
+
+
+@dataclass
+class PackageConfig:
+    """Configuration for delivery package."""
+    mass: float = 0.010  # 10 grams
+    size: float = 0.05   # 5cm cube (for collision)
+    drag_coeff: float = 0.5  # Drag during fall
+    pickup_radius: float = 0.15  # How close drone must be to pickup
+    drop_zone_radius: float = 0.3  # Target zone radius for successful delivery
+
+
+@dataclass
+class PackageState:
+    """State of the delivery package."""
+    status: PackageStatus = PackageStatus.WAITING
+    position: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    velocity: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    pickup_position: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    dropzone_position: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+    def copy(self) -> 'PackageState':
+        return PackageState(
+            status=self.status,
+            position=self.position.copy(),
+            velocity=self.velocity.copy(),
+            pickup_position=self.pickup_position.copy(),
+            dropzone_position=self.dropzone_position.copy()
+        )
 
 
 @dataclass
@@ -106,12 +146,20 @@ class DroneSimulation:
         3 (rear-left)     4 (rear-right)
 
     Motors 1 and 4 spin clockwise, motors 2 and 3 spin counter-clockwise.
+
+    Supports package delivery missions with pickup and drop mechanics.
     """
 
-    def __init__(self, config: Optional[DroneConfig] = None):
+    def __init__(
+        self,
+        config: Optional[DroneConfig] = None,
+        package_config: Optional[PackageConfig] = None
+    ):
         """Initialize the simulation with given configuration."""
         self.config = config or DroneConfig()
+        self.package_config = package_config or PackageConfig()
         self.state = DroneState()
+        self.package: Optional[PackageState] = None
         self._compute_allocation_matrix()
 
     def _compute_allocation_matrix(self):
@@ -134,11 +182,23 @@ class DroneSimulation:
         # Inverse for computing motor forces from desired thrust/torques
         self.allocation_matrix_inv = np.linalg.pinv(self.allocation_matrix)
 
-    def reset(self,
-              position: Optional[np.ndarray] = None,
-              velocity: Optional[np.ndarray] = None,
-              orientation: Optional[np.ndarray] = None) -> DroneState:
-        """Reset the simulation to initial conditions."""
+    def reset(
+        self,
+        position: Optional[np.ndarray] = None,
+        velocity: Optional[np.ndarray] = None,
+        orientation: Optional[np.ndarray] = None,
+        package_pickup: Optional[np.ndarray] = None,
+        package_dropzone: Optional[np.ndarray] = None
+    ) -> DroneState:
+        """Reset the simulation to initial conditions.
+
+        Args:
+            position: Initial drone position
+            velocity: Initial drone velocity
+            orientation: Initial drone orientation (quaternion)
+            package_pickup: If provided, sets up a delivery mission with pickup at this location
+            package_dropzone: Drop zone location for delivery mission
+        """
         self.state = DroneState()
 
         if position is not None:
@@ -160,15 +220,29 @@ class DroneSimulation:
         hover_rpm = np.sqrt(hover_force_per_motor / self.config.motor_constant)
         self.state.motor_speeds = np.full(4, hover_rpm)
 
+        # Set up package for delivery mission
+        if package_pickup is not None:
+            self.package = PackageState(
+                status=PackageStatus.WAITING,
+                position=np.array(package_pickup, dtype=np.float64),
+                velocity=np.zeros(3),
+                pickup_position=np.array(package_pickup, dtype=np.float64),
+                dropzone_position=np.array(package_dropzone if package_dropzone is not None
+                                          else [0, 0, 0], dtype=np.float64)
+            )
+        else:
+            self.package = None
+
         return self.state.copy()
 
-    def step(self, action: np.ndarray) -> DroneState:
+    def step(self, action: np.ndarray, drop_package: bool = False) -> DroneState:
         """
         Advance the simulation by one timestep.
 
         Args:
             action: Motor speed commands as normalized values [0, 1] for each motor,
                    or as [thrust, roll, pitch, yaw] commands depending on control mode.
+            drop_package: If True and package is attached, release the package.
 
         Returns:
             Updated drone state
@@ -181,11 +255,15 @@ class DroneSimulation:
         alpha = self.config.dt / (self.config.motor_time_constant + self.config.dt)
         self.state.motor_speeds = (1 - alpha) * self.state.motor_speeds + alpha * target_speeds
 
-        # Compute forces and torques
+        # Compute forces and torques (accounting for package mass if attached)
         forces, torques = self._compute_forces_and_torques()
 
         # Update state using semi-implicit Euler integration
         self._integrate(forces, torques)
+
+        # Handle package mechanics
+        if self.package is not None:
+            self._update_package(drop_package)
 
         return self.state.copy()
 
@@ -205,8 +283,13 @@ class DroneSimulation:
         # Transform thrust to world frame
         thrust_world = R @ thrust_body
 
+        # Calculate total mass (drone + package if attached)
+        total_mass = self.config.mass
+        if self.package is not None and self.package.status == PackageStatus.ATTACHED:
+            total_mass += self.package_config.mass
+
         # Gravity (world frame)
-        gravity = np.array([0, 0, -self.config.mass * self.config.gravity])
+        gravity = np.array([0, 0, -total_mass * self.config.gravity])
 
         # Aerodynamic drag (world frame, simplified)
         drag = -np.array([
@@ -220,12 +303,84 @@ class DroneSimulation:
 
         return total_forces, torques_body
 
+    def _update_package(self, drop_command: bool):
+        """Update package state based on drone position and drop command."""
+        if self.package is None:
+            return
+
+        pkg = self.package
+        dt = self.config.dt
+
+        if pkg.status == PackageStatus.WAITING:
+            # Check if drone is close enough to pick up
+            dist_to_pickup = np.linalg.norm(
+                self.state.position - pkg.pickup_position
+            )
+            # Must be close horizontally and low altitude for pickup
+            horizontal_dist = np.linalg.norm(
+                self.state.position[:2] - pkg.pickup_position[:2]
+            )
+            altitude = self.state.position[2]
+
+            if horizontal_dist < self.package_config.pickup_radius and altitude < 0.3:
+                pkg.status = PackageStatus.ATTACHED
+                pkg.position = self.state.position.copy()
+                pkg.velocity = self.state.velocity.copy()
+
+        elif pkg.status == PackageStatus.ATTACHED:
+            # Package follows drone
+            pkg.position = self.state.position.copy()
+            pkg.velocity = self.state.velocity.copy()
+
+            # Check for drop command
+            if drop_command:
+                pkg.status = PackageStatus.DROPPING
+                # Package inherits drone velocity at release
+                pkg.velocity = self.state.velocity.copy()
+
+        elif pkg.status == PackageStatus.DROPPING:
+            # Package in free fall with drag
+            # Gravity
+            acc = np.array([0, 0, -self.config.gravity])
+
+            # Air drag on package
+            speed = np.linalg.norm(pkg.velocity)
+            if speed > 0.01:
+                drag_force = -0.5 * self.config.air_density * \
+                            self.package_config.drag_coeff * \
+                            self.package_config.size**2 * \
+                            speed * pkg.velocity
+                acc += drag_force / self.package_config.mass
+
+            # Integrate
+            pkg.velocity += acc * dt
+            pkg.position += pkg.velocity * dt
+
+            # Check for ground contact
+            if pkg.position[2] <= 0:
+                pkg.position[2] = 0
+                pkg.velocity = np.zeros(3)
+
+                # Check if landed in drop zone
+                dist_to_dropzone = np.linalg.norm(
+                    pkg.position[:2] - pkg.dropzone_position[:2]
+                )
+                if dist_to_dropzone <= self.package_config.drop_zone_radius:
+                    pkg.status = PackageStatus.DELIVERED
+                else:
+                    pkg.status = PackageStatus.MISSED
+
     def _integrate(self, forces: np.ndarray, torques: np.ndarray):
         """Integrate equations of motion using semi-implicit Euler."""
         dt = self.config.dt
 
+        # Calculate total mass (drone + package if attached)
+        total_mass = self.config.mass
+        if self.package is not None and self.package.status == PackageStatus.ATTACHED:
+            total_mass += self.package_config.mass
+
         # Linear dynamics (world frame)
-        acceleration = forces / self.config.mass
+        acceleration = forces / total_mass
         self.state.velocity += acceleration * dt
         self.state.position += self.state.velocity * dt
 
@@ -271,11 +426,50 @@ class DroneSimulation:
 
     def compute_hover_action(self) -> np.ndarray:
         """Compute the action required for steady hover."""
-        hover_thrust = self.config.mass * self.config.gravity
+        # Account for package mass if attached
+        total_mass = self.config.mass
+        if self.package is not None and self.package.status == PackageStatus.ATTACHED:
+            total_mass += self.package_config.mass
+
+        hover_thrust = total_mass * self.config.gravity
         hover_force_per_motor = hover_thrust / 4
         hover_speed = np.sqrt(hover_force_per_motor / self.config.motor_constant)
         max_speed = self.config.max_rpm * 2 * np.pi / 60
         return np.full(4, hover_speed / max_speed)
+
+    def get_package_state(self) -> Optional[PackageState]:
+        """Get a copy of the current package state."""
+        if self.package is None:
+            return None
+        return self.package.copy()
+
+    def has_package(self) -> bool:
+        """Check if drone currently has a package attached."""
+        return (self.package is not None and
+                self.package.status == PackageStatus.ATTACHED)
+
+    def is_package_delivered(self) -> bool:
+        """Check if package was successfully delivered."""
+        return (self.package is not None and
+                self.package.status == PackageStatus.DELIVERED)
+
+    def is_package_missed(self) -> bool:
+        """Check if package missed the drop zone."""
+        return (self.package is not None and
+                self.package.status == PackageStatus.MISSED)
+
+    def get_delivery_accuracy(self) -> Optional[float]:
+        """Get distance from package landing to drop zone center.
+
+        Returns None if package hasn't landed yet.
+        """
+        if self.package is None:
+            return None
+        if self.package.status not in [PackageStatus.DELIVERED, PackageStatus.MISSED]:
+            return None
+        return float(np.linalg.norm(
+            self.package.position[:2] - self.package.dropzone_position[:2]
+        ))
 
 
 # Quaternion utilities

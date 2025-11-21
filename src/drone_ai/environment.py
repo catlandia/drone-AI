@@ -31,6 +31,7 @@ class TaskType(Enum):
     TRAJECTORY = "trajectory"
     VELOCITY = "velocity"
     DELIVERY = "delivery"  # Package pickup and drop mission
+    DELIVERY_ROUTE = "delivery_route"  # Long-range round-trip delivery mission
 
 
 class DroneEnv(gym.Env):
@@ -103,7 +104,7 @@ class DroneEnv(gym.Env):
         self.sim = DroneSimulation(self.base_config, self.package_config)
 
         # Define action space based on task
-        if task == TaskType.DELIVERY:
+        if task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
             # 4 motor commands + 1 drop signal
             self.action_space = spaces.Box(
                 low=0.0,
@@ -125,6 +126,9 @@ class DroneEnv(gym.Env):
         if task == TaskType.DELIVERY:
             # Add: package_status(1), has_package(1), pickup_rel(3), dropzone_rel(3)
             obs_dim = 19 + 1 + 8  # 28 total (prev_action is 5 for delivery)
+        elif task == TaskType.DELIVERY_ROUTE:
+            # Add: package_status(1), has_package(1), base_rel(3), dropzone_rel(3), deliveries_completed(1)
+            obs_dim = 19 + 1 + 9  # 29 total
         else:
             obs_dim = 19
         self.observation_space = spaces.Box(
@@ -146,9 +150,18 @@ class DroneEnv(gym.Env):
         self.package_picked_up = False
         self.delivery_phase = "pickup"  # "pickup", "deliver", "drop", "done"
 
+        # Delivery route parameters (long-range round-trip delivery)
+        self.base_position = np.zeros(3)  # Starting/reload position
+        self.route_distance = 100.0  # Distance to dropzone in meters (scales with difficulty)
+        self.drop_accuracy_radius = 5.0  # Must drop within 5m of target
+        self.deliveries_completed = 0
+        self.deliveries_successful = 0
+        self.route_phase = "outbound"  # "outbound", "dropping", "return", "reload"
+        self.route_score = 0.0  # Cumulative score for the route
+
         # Episode state
         self.step_count = 0
-        self.prev_action = np.zeros(5 if task == TaskType.DELIVERY else 4)
+        self.prev_action = np.zeros(5 if task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE] else 4)
         self.episode_reward = 0.0
         self.position_history: List[np.ndarray] = []
 
@@ -180,6 +193,13 @@ class DroneEnv(gym.Env):
             # Speed rewards
             'time_bonus': 0.5,            # Bonus for faster completion
             'efficiency': 5.0,            # Bonus for direct path to target
+
+            # === DELIVERY ROUTE REWARDS (long-range) ===
+            'route_delivery': 100.0,      # Big reward for successful delivery in route
+            'route_accuracy': 50.0,       # Bonus for accuracy (within 5m)
+            'route_missed': -80.0,        # Heavy penalty for missing (outside 5m)
+            'route_reload': 20.0,         # Bonus for successful return and reload
+            'route_progress': 0.01,       # Small reward for progress toward target
         }
 
         # Track timing for speed rewards
@@ -222,6 +242,24 @@ class DroneEnv(gym.Env):
             self.package_picked_up = False
             self.delivery_phase = "pickup"
             self.pickup_step = None  # Reset timing tracker
+        elif self.task == TaskType.DELIVERY_ROUTE:
+            # Start at base with package already attached
+            self.sim.reset(
+                position=self.base_position.copy(),
+                velocity=init_velocity,
+                orientation=init_orientation,
+                package_pickup=self.base_position,  # Pickup at base
+                package_dropzone=self.dropzone_position
+            )
+            # Immediately attach package (start with package)
+            if self.sim.package is not None:
+                self.sim.package.status = PackageStatus.ATTACHED
+                self.sim.package.position = self.base_position.copy()
+            self.route_phase = "outbound"
+            self.deliveries_completed = 0
+            self.deliveries_successful = 0
+            self.route_score = 0.0
+            self.pickup_step = 0  # Start timing from beginning
         else:
             self.sim.reset(
                 position=init_position,
@@ -232,7 +270,7 @@ class DroneEnv(gym.Env):
         # Reset episode state
         self.step_count = 0
         hover_action = self.sim.compute_hover_action()
-        if self.task == TaskType.DELIVERY:
+        if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
             self.prev_action = np.concatenate([hover_action, [0.0]])  # Add drop signal
         else:
             self.prev_action = hover_action
@@ -252,7 +290,7 @@ class DroneEnv(gym.Env):
         action = np.clip(action, 0, 1).astype(np.float32)
 
         # Handle delivery task with drop signal
-        if self.task == TaskType.DELIVERY:
+        if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
             motor_action = action[:4]
             drop_signal = action[4] > 0.5  # Threshold for drop command
             self.sim.step(motor_action, drop_package=drop_signal)
@@ -344,6 +382,32 @@ class DroneEnv(gym.Env):
                     np.zeros(3),  # dropzone_rel
                 ])
 
+        # Add delivery route observations (long-range)
+        elif self.task == TaskType.DELIVERY_ROUTE:
+            pkg = self.sim.get_package_state()
+            status_map = {
+                PackageStatus.WAITING: 0.0,
+                PackageStatus.ATTACHED: 0.25,
+                PackageStatus.DROPPING: 0.5,
+                PackageStatus.DELIVERED: 0.75,
+                PackageStatus.MISSED: 1.0
+            }
+            if pkg is not None:
+                pkg_status = np.array([status_map.get(pkg.status, 0.0)])
+                has_package = np.array([1.0 if self.sim.has_package() else 0.0])
+            else:
+                pkg_status = np.array([0.0])
+                has_package = np.array([0.0])
+
+            # Relative positions to base and dropzone (normalized for longer distances)
+            base_rel = (self.base_position - state.position) / self.route_distance
+            dropzone_rel = (self.dropzone_position - state.position) / self.route_distance
+
+            # Number of deliveries completed (normalized)
+            deliveries_norm = np.array([self.deliveries_completed / 10.0])  # Assume max ~10 deliveries
+
+            base_obs.extend([pkg_status, has_package, base_rel, dropzone_rel, deliveries_norm])
+
         observation = np.concatenate(base_obs).astype(np.float32)
 
         return observation
@@ -368,8 +432,8 @@ class DroneEnv(gym.Env):
         ang_vel_penalty = -weights['angular_velocity'] * np.linalg.norm(state.angular_velocity) ** 2
 
         # Action smoothness (penalize jerky control)
-        motor_action = action[:4] if self.task == TaskType.DELIVERY else action
-        prev_motor = self.prev_action[:4] if self.task == TaskType.DELIVERY else self.prev_action
+        motor_action = action[:4] if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE] else action
+        prev_motor = self.prev_action[:4] if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE] else self.prev_action
         action_diff = np.linalg.norm(motor_action - prev_motor)
         smoothness_penalty = -weights['action_smoothness'] * action_diff ** 2
 
@@ -390,6 +454,8 @@ class DroneEnv(gym.Env):
         delivery_reward = 0.0
         if self.task == TaskType.DELIVERY:
             delivery_reward = self._compute_delivery_reward(action)
+        elif self.task == TaskType.DELIVERY_ROUTE:
+            delivery_reward = self._compute_route_reward(action)
 
         total_reward = (
             pos_reward +
@@ -508,21 +574,123 @@ class DroneEnv(gym.Env):
 
         return reward
 
+    def _compute_route_reward(self, action: np.ndarray) -> float:
+        """Compute delivery route rewards (long-range round-trip).
+
+        Priorities:
+        1. ACCURACY - Drop within 5m of target for reward, outside for penalty
+        2. CAREFULNESS - Smooth handling during flight
+        3. SPEED - Faster round trips = more reward
+        """
+        weights = self.reward_weights
+        reward = 0.0
+
+        pkg = self.sim.get_package_state()
+        state = self.sim.state
+
+        # === PROGRESS REWARD (small continuous reward for moving toward target) ===
+        if self.route_phase == "outbound" and pkg is not None:
+            dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
+            # Reward for getting closer to dropzone
+            progress = self.route_distance - dist_to_dropzone
+            reward += weights['route_progress'] * max(0, progress)
+
+        elif self.route_phase == "return":
+            dist_to_base = np.linalg.norm(state.position[:2] - self.base_position[:2])
+            # Reward for getting closer to base
+            progress = self.route_distance - dist_to_base
+            reward += weights['route_progress'] * max(0, progress)
+
+        # === CAREFULNESS: Rough handling penalty while carrying ===
+        if pkg is not None and pkg.status == PackageStatus.ATTACHED:
+            motor_action = action[:4]
+            prev_motor = self.prev_action[:4]
+            action_jerk = np.linalg.norm(motor_action - prev_motor)
+            if action_jerk > 0.1:
+                reward += weights['rough_handling'] * action_jerk
+
+            euler = state.get_euler_angles()
+            tilt = abs(euler[0]) + abs(euler[1])
+            if tilt > 0.3:
+                reward += weights['rough_handling'] * tilt
+
+        # === DELIVERY RESULT ===
+        if pkg is not None and pkg.status in [PackageStatus.DELIVERED, PackageStatus.MISSED]:
+            if self.route_phase == "outbound":
+                accuracy = self.sim.get_delivery_accuracy()
+                if accuracy is not None:
+                    if accuracy <= self.drop_accuracy_radius:
+                        # SUCCESS: Within 5m - big reward!
+                        reward += weights['route_delivery']
+                        # Accuracy bonus: closer = more reward
+                        accuracy_bonus = weights['route_accuracy'] * (1 - accuracy / self.drop_accuracy_radius)
+                        reward += accuracy_bonus
+                        self.deliveries_successful += 1
+                        self.route_score += 100 + accuracy_bonus
+                    else:
+                        # MISSED: Outside 5m - penalty
+                        reward += weights['route_missed']
+                        # Extra penalty based on how far outside
+                        overshoot = accuracy - self.drop_accuracy_radius
+                        reward -= min(30, overshoot * 2)
+                        self.route_score -= 50
+
+                self.deliveries_completed += 1
+                self.route_phase = "return"
+                # Update target to base for return trip
+                self.target_position = self.base_position.copy()
+                self.target_position[2] = 1.0  # Fly at 1m altitude
+
+        # === RELOAD AT BASE ===
+        if self.route_phase == "return":
+            dist_to_base = np.linalg.norm(state.position[:2] - self.base_position[:2])
+            altitude = state.position[2]
+
+            # Check if back at base and low enough to reload
+            if dist_to_base < 1.0 and altitude < 0.5:
+                reward += weights['route_reload']
+                self.route_score += 20
+
+                # Reset package for next delivery
+                self.route_phase = "reload"
+
+        # === RELOAD COMPLETE - Start next delivery ===
+        if self.route_phase == "reload":
+            # Respawn package at base, attached to drone
+            if self.sim.package is not None:
+                self.sim.package.status = PackageStatus.ATTACHED
+                self.sim.package.position = state.position.copy()
+                self.sim.package.pickup_position = self.base_position.copy()
+            self.route_phase = "outbound"
+            self.target_position = self.dropzone_position.copy()
+            self.target_position[2] = 1.5  # Higher altitude for dropping
+
+        return reward
+
     def _check_terminated(self) -> bool:
         """Check if episode should terminate."""
         # Crash detection
         if self.sim.is_crashed():
             return True
 
-        # Out of bounds
+        # Out of bounds - expanded for long-range routes
         position = self.sim.state.position
-        if np.any(np.abs(position[:2]) > 10) or position[2] > 20:
-            return True
+        if self.task == TaskType.DELIVERY_ROUTE:
+            # Much larger bounds for long-range delivery
+            max_dist = self.route_distance * 1.5
+            if np.any(np.abs(position[:2]) > max_dist) or position[2] > 50:
+                return True
+        else:
+            if np.any(np.abs(position[:2]) > 10) or position[2] > 20:
+                return True
 
         # Delivery task termination
         if self.task == TaskType.DELIVERY:
             if self.sim.is_package_delivered() or self.sim.is_package_missed():
                 return True
+
+        # Delivery route doesn't terminate on single delivery - it continues
+        # Terminate only on crash, out of bounds, or max steps
 
         return False
 
@@ -576,6 +744,37 @@ class DroneEnv(gym.Env):
             # Initial target is pickup location (fly there first)
             self.target_position = self.pickup_position.copy()
             self.target_position[2] = 0.5  # Hover above pickup point
+
+        elif self.task == TaskType.DELIVERY_ROUTE:
+            # Long-range delivery route setup
+            # Base position is at origin (starting point)
+            self.base_position = np.array([0.0, 0.0, 1.0])  # Start hovering at 1m
+
+            # Route distance scales with difficulty: 50m to 1000m (1km)
+            # Lower difficulty = shorter routes for learning
+            # difficulty 0.0 -> 50m, difficulty 1.0 -> 1000m
+            self.route_distance = 50.0 + self.difficulty * 950.0
+
+            # Drop zone is route_distance away in a random direction
+            dropzone_angle = self.np_random.uniform(0, 2 * np.pi)
+            self.dropzone_position = np.array([
+                self.route_distance * np.cos(dropzone_angle),
+                self.route_distance * np.sin(dropzone_angle),
+                0.0  # On ground
+            ])
+
+            # Accuracy radius is 5m (as specified)
+            self.drop_accuracy_radius = 5.0
+
+            # Initial target is the dropzone (start with package, fly to dropzone)
+            self.target_position = self.dropzone_position.copy()
+            self.target_position[2] = 1.5  # Higher altitude for dropping
+
+            # Reset route state
+            self.route_phase = "outbound"
+            self.deliveries_completed = 0
+            self.deliveries_successful = 0
+            self.route_score = 0.0
 
     def _update_task(self):
         """Update task state (e.g., advance to next waypoint)."""
@@ -732,6 +931,34 @@ class DroneEnv(gym.Env):
                 info['package_missed'] = self.sim.is_package_missed()
                 info['delivery_accuracy'] = self.sim.get_delivery_accuracy()
 
+        # Add delivery route info (long-range)
+        elif self.task == TaskType.DELIVERY_ROUTE:
+            pkg = self.sim.get_package_state()
+            info['route_phase'] = self.route_phase
+            info['base_position'] = self.base_position.copy()
+            info['dropzone_position'] = self.dropzone_position.copy()
+            info['route_distance'] = self.route_distance
+            info['drop_accuracy_radius'] = self.drop_accuracy_radius
+            info['deliveries_completed'] = self.deliveries_completed
+            info['deliveries_successful'] = self.deliveries_successful
+            info['route_score'] = self.route_score
+
+            if pkg is not None:
+                info['package_status'] = pkg.status.value
+                info['package_position'] = pkg.position.copy()
+                info['has_package'] = self.sim.has_package()
+                info['delivery_accuracy'] = self.sim.get_delivery_accuracy()
+
+            # Distance to current target
+            if self.route_phase == "outbound":
+                info['distance_to_dropzone'] = np.linalg.norm(
+                    state.position[:2] - self.dropzone_position[:2]
+                )
+            else:
+                info['distance_to_base'] = np.linalg.norm(
+                    state.position[:2] - self.base_position[:2]
+                )
+
         return info
 
     def render(self):
@@ -809,4 +1036,26 @@ def register_envs():
         entry_point="drone_ai.environment:DroneEnv",
         kwargs={"task": TaskType.DELIVERY, "difficulty": 0.7, "domain_randomization": True},
         max_episode_steps=3000
+    )
+
+    # Long-range delivery route environments
+    gym.register(
+        id="DroneDeliveryRoute-v0",
+        entry_point="drone_ai.environment:DroneEnv",
+        kwargs={"task": TaskType.DELIVERY_ROUTE, "difficulty": 0.3},
+        max_episode_steps=10000  # Longer episodes for long-range flight
+    )
+
+    gym.register(
+        id="DroneDeliveryRoute-v1",
+        entry_point="drone_ai.environment:DroneEnv",
+        kwargs={"task": TaskType.DELIVERY_ROUTE, "difficulty": 0.7, "domain_randomization": True},
+        max_episode_steps=20000  # Even longer for multiple deliveries
+    )
+
+    gym.register(
+        id="DroneDeliveryRoute-v2",
+        entry_point="drone_ai.environment:DroneEnv",
+        kwargs={"task": TaskType.DELIVERY_ROUTE, "difficulty": 1.0, "domain_randomization": True},
+        max_episode_steps=50000  # Full 1km routes with domain randomization
     )

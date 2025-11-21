@@ -123,6 +123,29 @@ The delivery task has three phases:
 2. **Transport**: Carry the package to the magenta drop zone
 3. **Drop**: Release the package over the target (accuracy is rewarded!)
 
+### Long-Range Delivery Route (NEW!)
+Complete round-trip delivery missions over long distances (up to 1km).
+```bash
+# Train delivery route (starts easy with shorter distances)
+python -m drone_ai.train --task delivery_route --difficulty 0.3 --total-timesteps 5000000
+
+# Full 1km route with domain randomization
+python -m drone_ai.train --task delivery_route --difficulty 1.0 --domain-randomization
+```
+
+The delivery route task features:
+- **Pre-loaded package**: Drone starts with package attached at base
+- **Long-range flight**: Fly up to 1km to the drop zone (scales with difficulty)
+- **Precision drop**: Must drop within 5 meters of target for reward
+- **Return trip**: Fly back to base after delivery
+- **Reload**: Pick up new package and repeat
+- **Scoring**: Rewards for accuracy and speed, penalties for misses
+
+Distance scaling:
+- Difficulty 0.0 = 50m routes (for learning)
+- Difficulty 0.5 = 500m routes
+- Difficulty 1.0 = 1000m routes (1km)
+
 ### Velocity Tracking
 Maintain a target velocity (useful for trajectory following).
 ```bash

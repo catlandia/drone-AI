@@ -20,7 +20,7 @@ from enum import Enum
 
 from drone_ai.simulation import (
     DroneSimulation, DroneConfig, DroneState, EnvironmentConfig,
-    PackageConfig, PackageState, PackageStatus
+    PackageConfig, PackageState, PackageStatus, Obstacle
 )
 
 
@@ -127,8 +127,9 @@ class DroneEnv(gym.Env):
             # Add: package_status(1), has_package(1), pickup_rel(3), dropzone_rel(3)
             obs_dim = 19 + 1 + 8  # 28 total (prev_action is 5 for delivery)
         elif task == TaskType.DELIVERY_ROUTE:
-            # Add: package_status(1), has_package(1), base_rel(3), dropzone_rel(3), deliveries_completed(1)
-            obs_dim = 19 + 1 + 9  # 29 total
+            # Add: package_status(1), has_package(1), base_rel(3), dropzone_rel(3),
+            #      deliveries_completed(1), drop_prediction(1), obstacle_proximity(1)
+            obs_dim = 19 + 1 + 11  # 31 total
         else:
             obs_dim = 19
         self.observation_space = spaces.Box(
@@ -158,6 +159,13 @@ class DroneEnv(gym.Env):
         self.deliveries_successful = 0
         self.route_phase = "outbound"  # "outbound", "dropping", "return", "reload"
         self.route_score = 0.0  # Cumulative score for the route
+
+        # Waypoints for varied routes (not just straight lines)
+        self.route_waypoints: List[np.ndarray] = []
+        self.current_waypoint_idx = 0
+
+        # Obstacles (trees, buildings)
+        self.obstacles: List[Obstacle] = []
 
         # Episode state
         self.step_count = 0
@@ -200,6 +208,15 @@ class DroneEnv(gym.Env):
             'route_missed': -80.0,        # Heavy penalty for missing (outside 5m)
             'route_reload': 20.0,         # Bonus for successful return and reload
             'route_progress': 0.01,       # Small reward for progress toward target
+
+            # Smart dropping (drop while moving)
+            'smart_drop_bonus': 30.0,     # Bonus for accurate drop while moving fast
+            'speed_delivery_bonus': 0.5,  # Bonus multiplier for faster deliveries
+
+            # Obstacle avoidance
+            'obstacle_proximity': -0.5,   # Penalty for being too close to obstacles
+            'obstacle_collision': -100.0, # Heavy penalty for hitting obstacles
+            'waypoint_reached': 5.0,      # Bonus for reaching waypoints
         }
 
         # Track timing for speed rewards
@@ -251,6 +268,10 @@ class DroneEnv(gym.Env):
                 package_pickup=self.base_position,  # Pickup at base
                 package_dropzone=self.dropzone_position
             )
+            # Add obstacles to simulation
+            self.sim.obstacles = self.obstacles
+            self.sim._obstacle_collision = False
+
             # Immediately attach package (start with package)
             if self.sim.package is not None:
                 self.sim.package.status = PackageStatus.ATTACHED
@@ -260,6 +281,7 @@ class DroneEnv(gym.Env):
             self.deliveries_successful = 0
             self.route_score = 0.0
             self.pickup_step = 0  # Start timing from beginning
+            self.current_waypoint_idx = 0
         else:
             self.sim.reset(
                 position=init_position,
@@ -406,7 +428,24 @@ class DroneEnv(gym.Env):
             # Number of deliveries completed (normalized)
             deliveries_norm = np.array([self.deliveries_completed / 10.0])  # Assume max ~10 deliveries
 
-            base_obs.extend([pkg_status, has_package, base_rel, dropzone_rel, deliveries_norm])
+            # PREDICTIVE DROP: How accurate would a drop be right now?
+            # This helps the drone learn WHEN to release while moving
+            if self.sim.has_package():
+                pred_accuracy = self.sim.get_drop_accuracy_prediction(self.dropzone_position)
+                # Normalize: 0 = perfect, 1 = at accuracy radius, >1 = would miss
+                drop_prediction = np.array([min(2.0, pred_accuracy / self.drop_accuracy_radius)])
+            else:
+                drop_prediction = np.array([2.0])  # No package, max value
+
+            # Nearest obstacle distance (normalized)
+            if self.obstacles:
+                nearest_obs = self.sim.get_nearest_obstacle_distance()
+                obstacle_proximity = np.array([min(1.0, nearest_obs / 20.0)])  # Normalize to 20m
+            else:
+                obstacle_proximity = np.array([1.0])  # No obstacles
+
+            base_obs.extend([pkg_status, has_package, base_rel, dropzone_rel,
+                           deliveries_norm, drop_prediction, obstacle_proximity])
 
         observation = np.concatenate(base_obs).astype(np.float32)
 
@@ -601,6 +640,29 @@ class DroneEnv(gym.Env):
             progress = self.route_distance - dist_to_base
             reward += weights['route_progress'] * max(0, progress)
 
+        # === WAYPOINT NAVIGATION ===
+        if self.route_phase == "outbound" and self.route_waypoints:
+            if self.current_waypoint_idx < len(self.route_waypoints):
+                current_wp = self.route_waypoints[self.current_waypoint_idx]
+                dist_to_wp = np.linalg.norm(state.position - current_wp)
+
+                if dist_to_wp < 5.0:  # Reached waypoint (within 5m)
+                    reward += weights['waypoint_reached']
+                    self.current_waypoint_idx += 1
+                    # Update target to next waypoint or dropzone
+                    if self.current_waypoint_idx < len(self.route_waypoints):
+                        self.target_position = self.route_waypoints[self.current_waypoint_idx].copy()
+                    else:
+                        self.target_position = self.dropzone_position.copy()
+                        self.target_position[2] = 10.0  # Approach altitude
+
+        # === OBSTACLE AVOIDANCE ===
+        if self.obstacles:
+            nearest_dist = self.sim.get_nearest_obstacle_distance()
+            if nearest_dist < 5.0:  # Within 5m of obstacle
+                proximity_penalty = weights['obstacle_proximity'] * (5.0 - nearest_dist)
+                reward += proximity_penalty
+
         # === CAREFULNESS: Rough handling penalty while carrying ===
         if pkg is not None and pkg.status == PackageStatus.ATTACHED:
             motor_action = action[:4]
@@ -625,6 +687,15 @@ class DroneEnv(gym.Env):
                         # Accuracy bonus: closer = more reward
                         accuracy_bonus = weights['route_accuracy'] * (1 - accuracy / self.drop_accuracy_radius)
                         reward += accuracy_bonus
+
+                        # SMART DROP BONUS: Extra reward for dropping while moving fast
+                        # This encourages the drone to calculate drop timing, not hover
+                        speed = np.linalg.norm(state.velocity[:2])  # Horizontal speed
+                        if speed > 2.0:  # Moving faster than 2 m/s
+                            smart_drop_bonus = weights['smart_drop_bonus'] * min(1.0, speed / 5.0)
+                            reward += smart_drop_bonus
+                            self.route_score += smart_drop_bonus
+
                         self.deliveries_successful += 1
                         self.route_score += 100 + accuracy_bonus
                     else:
@@ -637,6 +708,8 @@ class DroneEnv(gym.Env):
 
                 self.deliveries_completed += 1
                 self.route_phase = "return"
+                # Reset waypoint index for return trip (go straight back)
+                self.current_waypoint_idx = 0
                 # Update target to base for return trip
                 self.target_position = self.base_position.copy()
                 self.target_position[2] = 1.0  # Fly at 1m altitude
@@ -766,9 +839,19 @@ class DroneEnv(gym.Env):
             # Accuracy radius is 5m (as specified)
             self.drop_accuracy_radius = 5.0
 
-            # Initial target is the dropzone (start with package, fly to dropzone)
-            self.target_position = self.dropzone_position.copy()
-            self.target_position[2] = 1.5  # Higher altitude for dropping
+            # Generate waypoints for varied routes (not straight lines)
+            self._generate_route_waypoints()
+
+            # Generate obstacles along the route
+            self._generate_obstacles()
+
+            # Initial target is first waypoint (or dropzone if no waypoints)
+            if self.route_waypoints:
+                self.current_waypoint_idx = 0
+                self.target_position = self.route_waypoints[0].copy()
+            else:
+                self.target_position = self.dropzone_position.copy()
+                self.target_position[2] = 1.5  # Higher altitude for dropping
 
             # Reset route state
             self.route_phase = "outbound"
@@ -818,6 +901,110 @@ class DroneEnv(gym.Env):
             self.np_random.uniform(-range_xy, range_xy),
             self.np_random.uniform(0.5, 0.5 + range_z)
         ])
+
+    def _generate_route_waypoints(self):
+        """Generate waypoints for varied route (not straight line)."""
+        self.route_waypoints = []
+
+        # Number of waypoints scales with difficulty and distance
+        num_waypoints = int(1 + self.difficulty * 3)  # 1-4 waypoints
+
+        # Direction from base to dropzone
+        direction = self.dropzone_position[:2] - self.base_position[:2]
+        total_dist = np.linalg.norm(direction)
+        if total_dist < 1:
+            return
+
+        direction_norm = direction / total_dist
+
+        # Perpendicular direction for offsets
+        perp = np.array([-direction_norm[1], direction_norm[0]])
+
+        for i in range(num_waypoints):
+            # Position along the route
+            t = (i + 1) / (num_waypoints + 1)
+            base_pos = self.base_position[:2] + direction * t
+
+            # Random lateral offset (makes route curved/varied)
+            max_offset = self.route_distance * 0.2 * self.difficulty  # Up to 20% of distance
+            offset = self.np_random.uniform(-max_offset, max_offset)
+
+            waypoint = np.array([
+                base_pos[0] + perp[0] * offset,
+                base_pos[1] + perp[1] * offset,
+                self.np_random.uniform(5, 15)  # Vary altitude 5-15m
+            ])
+            self.route_waypoints.append(waypoint)
+
+        # Add final approach to dropzone
+        final_approach = self.dropzone_position.copy()
+        final_approach[2] = 10.0  # Approach at 10m altitude
+        self.route_waypoints.append(final_approach)
+
+    def _generate_obstacles(self):
+        """Generate obstacles (trees, buildings) along the route."""
+        self.obstacles = []
+
+        # Number of obstacles scales with difficulty
+        num_obstacles = int(self.difficulty * 15)  # 0-15 obstacles
+
+        if num_obstacles == 0:
+            return
+
+        # Direction from base to dropzone
+        direction = self.dropzone_position[:2] - self.base_position[:2]
+        total_dist = np.linalg.norm(direction)
+        if total_dist < 10:
+            return
+
+        direction_norm = direction / total_dist
+        perp = np.array([-direction_norm[1], direction_norm[0]])
+
+        for _ in range(num_obstacles):
+            # Position along route corridor (not too close to endpoints)
+            t = self.np_random.uniform(0.1, 0.9)
+            base_pos = self.base_position[:2] + direction * t
+
+            # Lateral offset (within corridor)
+            corridor_width = min(50, self.route_distance * 0.1)
+            lateral_offset = self.np_random.uniform(-corridor_width, corridor_width)
+
+            pos = np.array([
+                base_pos[0] + perp[0] * lateral_offset,
+                base_pos[1] + perp[1] * lateral_offset,
+                0.0
+            ])
+
+            # Random obstacle type
+            obs_type = self.np_random.choice(["tree", "building", "pole"])
+            if obs_type == "tree":
+                radius = self.np_random.uniform(1, 3)
+                height = self.np_random.uniform(5, 15)
+            elif obs_type == "building":
+                radius = self.np_random.uniform(5, 15)
+                height = self.np_random.uniform(8, 25)
+            else:  # pole
+                radius = self.np_random.uniform(0.5, 1)
+                height = self.np_random.uniform(10, 30)
+
+            # Don't place obstacle too close to waypoints or dropzone
+            too_close = False
+            for wp in self.route_waypoints:
+                if np.linalg.norm(pos[:2] - wp[:2]) < radius + 10:
+                    too_close = True
+                    break
+            if np.linalg.norm(pos[:2] - self.dropzone_position[:2]) < radius + 10:
+                too_close = True
+            if np.linalg.norm(pos[:2] - self.base_position[:2]) < radius + 10:
+                too_close = True
+
+            if not too_close:
+                self.obstacles.append(Obstacle(
+                    position=pos,
+                    radius=radius,
+                    height=height,
+                    obstacle_type=obs_type
+                ))
 
     def _get_initial_position(self) -> np.ndarray:
         """Get initial position with optional randomization."""

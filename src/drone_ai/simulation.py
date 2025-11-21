@@ -15,7 +15,7 @@ parameters that can be tuned to match real drone hardware.
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from enum import Enum
 import math
 
@@ -94,6 +94,36 @@ class DroneConfig:
 
     # Simulation
     dt: float = 0.01  # Simulation timestep (seconds)
+
+
+@dataclass
+class Obstacle:
+    """Represents an obstacle in the environment."""
+    position: np.ndarray  # Center position (x, y, z_base)
+    radius: float  # Horizontal radius (cylinder)
+    height: float  # Vertical height
+    obstacle_type: str = "tree"  # "tree", "building", "pole"
+
+    def check_collision(self, point: np.ndarray, margin: float = 0.2) -> bool:
+        """Check if a point collides with this obstacle."""
+        # Horizontal distance check
+        horiz_dist = np.linalg.norm(point[:2] - self.position[:2])
+        if horiz_dist > self.radius + margin:
+            return False
+        # Vertical check (obstacle goes from ground to height)
+        if point[2] > self.height + margin:
+            return False
+        if point[2] < 0:
+            return False
+        return True
+
+    def distance_to(self, point: np.ndarray) -> float:
+        """Get minimum distance from point to obstacle surface."""
+        horiz_dist = np.linalg.norm(point[:2] - self.position[:2]) - self.radius
+        if point[2] > self.height:
+            vert_dist = point[2] - self.height
+            return np.sqrt(max(0, horiz_dist)**2 + vert_dist**2)
+        return max(0, horiz_dist)
 
 
 @dataclass
@@ -184,7 +214,8 @@ class DroneSimulation:
         self,
         config: Optional[DroneConfig] = None,
         package_config: Optional[PackageConfig] = None,
-        env_config: Optional[EnvironmentConfig] = None
+        env_config: Optional[EnvironmentConfig] = None,
+        obstacles: Optional[List['Obstacle']] = None
     ):
         """Initialize the simulation with given configuration."""
         self.config = config or DroneConfig()
@@ -192,7 +223,9 @@ class DroneSimulation:
         self.env_config = env_config or EnvironmentConfig()
         self.state = DroneState()
         self.package: Optional[PackageState] = None
+        self.obstacles = obstacles or []
         self._current_wind = np.zeros(3)  # Current wind velocity
+        self._obstacle_collision = False  # Track if crashed into obstacle
         self._compute_allocation_matrix()
 
     def _compute_allocation_matrix(self):
@@ -533,7 +566,82 @@ class DroneSimulation:
         high_velocity = np.linalg.norm(self.state.velocity) > 20
         high_angular = np.linalg.norm(self.state.angular_velocity) > 30
 
-        return (on_ground and tilted) or high_velocity or high_angular
+        # Check obstacle collision
+        obstacle_hit = self._obstacle_collision or self.check_obstacle_collision()
+
+        return (on_ground and tilted) or high_velocity or high_angular or obstacle_hit
+
+    def check_obstacle_collision(self) -> bool:
+        """Check if drone collides with any obstacle."""
+        for obstacle in self.obstacles:
+            if obstacle.check_collision(self.state.position):
+                self._obstacle_collision = True
+                return True
+        return False
+
+    def get_nearest_obstacle_distance(self) -> float:
+        """Get distance to the nearest obstacle."""
+        if not self.obstacles:
+            return float('inf')
+        return min(obs.distance_to(self.state.position) for obs in self.obstacles)
+
+    def get_obstacle_distances(self) -> np.ndarray:
+        """Get distances to all obstacles (for observation)."""
+        if not self.obstacles:
+            return np.array([])
+        return np.array([obs.distance_to(self.state.position) for obs in self.obstacles])
+
+    def predict_drop_landing(self) -> Tuple[np.ndarray, float]:
+        """Predict where a package would land if dropped now.
+
+        Calculates the landing position based on current drone position,
+        velocity, and altitude, accounting for gravity and drag.
+
+        Returns:
+            Tuple of (landing_position, time_to_land)
+        """
+        pos = self.state.position.copy()
+        vel = self.state.velocity.copy()
+        altitude = pos[2]
+
+        if altitude <= 0:
+            return pos, 0.0
+
+        # Simple physics prediction with drag
+        # For more accuracy, we simulate the fall
+        dt = 0.05  # Prediction time step
+        pred_pos = pos.copy()
+        pred_vel = vel.copy()
+        time = 0.0
+
+        while pred_pos[2] > 0 and time < 30:  # Max 30 seconds prediction
+            # Gravity
+            acc = np.array([0.0, 0.0, -self.config.gravity])
+
+            # Air drag on package
+            speed = np.linalg.norm(pred_vel)
+            if speed > 0.01:
+                drag_force = -0.5 * self.config.air_density * \
+                            self.package_config.drag_coeff * \
+                            self.package_config.size**2 * \
+                            speed * pred_vel
+                acc += drag_force / self.package_config.mass
+
+            pred_vel += acc * dt
+            pred_pos += pred_vel * dt
+            time += dt
+
+        # Clamp to ground
+        pred_pos[2] = 0
+        return pred_pos, time
+
+    def get_drop_accuracy_prediction(self, target: np.ndarray) -> float:
+        """Predict accuracy if package is dropped now.
+
+        Returns distance from predicted landing to target.
+        """
+        landing_pos, _ = self.predict_drop_landing()
+        return float(np.linalg.norm(landing_pos[:2] - target[:2]))
 
     def compute_hover_action(self) -> np.ndarray:
         """Compute the action required for steady hover."""

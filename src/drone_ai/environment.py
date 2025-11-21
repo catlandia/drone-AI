@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, Tuple, List
 from enum import Enum
 
 from drone_ai.simulation import (
-    DroneSimulation, DroneConfig, DroneState,
+    DroneSimulation, DroneConfig, DroneState, EnvironmentConfig,
     PackageConfig, PackageState, PackageStatus
 )
 
@@ -153,22 +153,37 @@ class DroneEnv(gym.Env):
         self.position_history: List[np.ndarray] = []
 
         # Reward weights (tunable)
+        # Main learning priorities: ACCURACY, CAREFULNESS, SPEED
         self.reward_weights = {
-            'position': 1.0,
-            'velocity': 0.1,
-            'orientation': 0.2,
-            'angular_velocity': 0.05,
-            'action_smoothness': 0.1,
-            'alive': 0.1,
-            'crash': -10.0,
-            'success': 5.0,
-            # Delivery-specific rewards
-            'pickup': 10.0,          # Bonus for picking up package
-            'delivery': 20.0,        # Bonus for successful delivery
-            'accuracy': 10.0,        # Bonus scaled by delivery accuracy
-            'drop_penalty': -5.0,    # Penalty for dropping at wrong time
-            'missed': -15.0,         # Penalty for missing drop zone
+            # === CAREFULNESS (smooth, stable flight) ===
+            'position': 0.5,              # Track target position
+            'velocity': 0.3,              # Penalize fast/jerky movement
+            'orientation': 0.5,           # Keep level (careful flight)
+            'angular_velocity': 0.2,      # Smooth rotations
+            'action_smoothness': 0.3,     # Smooth control inputs
+            'alive': 0.05,                # Small survival bonus
+            'crash': -50.0,               # Heavy crash penalty (be careful!)
+            'success': 2.0,
+
+            # === DELIVERY TASK REWARDS ===
+            # Accuracy rewards (most important for delivery)
+            'pickup': 5.0,                # Bonus for picking up package
+            'delivery': 30.0,             # Big bonus for successful delivery
+            'accuracy': 50.0,             # HUGE bonus for precise drops (scaled by distance)
+            'bullseye': 20.0,             # Extra bonus for perfect center drop
+
+            # Carefulness penalties
+            'drop_penalty': -10.0,        # Penalty for dropping at wrong location
+            'missed': -30.0,              # Heavy penalty for missing drop zone
+            'rough_handling': -0.1,       # Penalty for jerky movements while carrying
+
+            # Speed rewards
+            'time_bonus': 0.5,            # Bonus for faster completion
+            'efficiency': 5.0,            # Bonus for direct path to target
         }
+
+        # Track timing for speed rewards
+        self.pickup_step = None  # Step when package was picked up
 
         # Visualization
         self._renderer = None
@@ -206,6 +221,7 @@ class DroneEnv(gym.Env):
             )
             self.package_picked_up = False
             self.delivery_phase = "pickup"
+            self.pickup_step = None  # Reset timing tracker
         else:
             self.sim.reset(
                 position=init_position,
@@ -390,7 +406,13 @@ class DroneEnv(gym.Env):
         return float(total_reward)
 
     def _compute_delivery_reward(self, action: np.ndarray) -> float:
-        """Compute delivery-specific rewards."""
+        """Compute delivery-specific rewards.
+
+        Priorities:
+        1. ACCURACY - Precise drops get massive bonuses
+        2. CAREFULNESS - Smooth handling, no crashes
+        3. SPEED - Faster completion = more reward
+        """
         weights = self.reward_weights
         reward = 0.0
 
@@ -398,39 +420,91 @@ class DroneEnv(gym.Env):
         if pkg is None:
             return 0.0
 
-        # Pickup bonus - one-time reward when package is picked up
+        # === PICKUP PHASE ===
         if pkg.status == PackageStatus.ATTACHED and not self.package_picked_up:
             reward += weights['pickup']
             self.package_picked_up = True
+            self.pickup_step = self.step_count  # Record pickup time for speed calc
             self.delivery_phase = "deliver"
 
-        # Successful delivery bonus
+        # === CAREFULNESS: Rough handling penalty while carrying ===
+        if pkg.status == PackageStatus.ATTACHED:
+            # Penalize jerky movements while carrying package
+            motor_action = action[:4]
+            prev_motor = self.prev_action[:4]
+            action_jerk = np.linalg.norm(motor_action - prev_motor)
+            if action_jerk > 0.1:  # Threshold for "rough" handling
+                reward += weights['rough_handling'] * action_jerk
+
+            # Also penalize excessive tilt while carrying
+            euler = self.sim.state.get_euler_angles()
+            tilt = abs(euler[0]) + abs(euler[1])
+            if tilt > 0.3:  # More than ~17 degrees
+                reward += weights['rough_handling'] * tilt
+
+        # === SUCCESSFUL DELIVERY: ACCURACY + SPEED ===
         if pkg.status == PackageStatus.DELIVERED:
             if self.delivery_phase != "done":
+                # Base delivery bonus
                 reward += weights['delivery']
-                # Accuracy bonus (closer to center = more reward)
+
+                # ACCURACY BONUS (the main prize!)
                 accuracy = self.sim.get_delivery_accuracy()
                 if accuracy is not None:
-                    # Max bonus at center, decreasing with distance
-                    accuracy_bonus = weights['accuracy'] * max(0, 1 - accuracy / self.package_config.drop_zone_radius)
+                    # Exponential bonus - much better reward for precise drops
+                    # accuracy = 0 (perfect) -> full bonus
+                    # accuracy = radius (edge) -> ~37% bonus
+                    accuracy_ratio = accuracy / self.package_config.drop_zone_radius
+                    accuracy_bonus = weights['accuracy'] * np.exp(-accuracy_ratio * 2)
                     reward += accuracy_bonus
+
+                    # BULLSEYE bonus for very precise drops (within 10% of radius)
+                    if accuracy < self.package_config.drop_zone_radius * 0.1:
+                        reward += weights['bullseye']
+
+                # SPEED BONUS - faster delivery = more reward
+                if self.pickup_step is not None:
+                    delivery_time = self.step_count - self.pickup_step
+                    # Bonus inversely proportional to time taken
+                    # Max bonus if delivered in ~100 steps, decreasing after
+                    speed_factor = max(0, 1 - delivery_time / 500)
+                    reward += weights['time_bonus'] * speed_factor * 20
+
+                    # Efficiency bonus - compare to optimal path
+                    optimal_distance = np.linalg.norm(
+                        self.dropzone_position[:2] - self.pickup_position[:2]
+                    )
+                    # Rough estimate: optimal time = distance / avg_speed
+                    optimal_steps = optimal_distance * 100  # ~1m/s average
+                    if delivery_time < optimal_steps * 1.5:
+                        reward += weights['efficiency']
+
                 self.delivery_phase = "done"
 
-        # Missed delivery penalty
+        # === MISSED DELIVERY: Heavy penalty ===
         if pkg.status == PackageStatus.MISSED:
             if self.delivery_phase != "done":
                 reward += weights['missed']
+
+                # Additional penalty based on how far off
+                miss_distance = self.sim.get_delivery_accuracy()
+                if miss_distance is not None:
+                    # Extra penalty for being way off
+                    reward -= min(10, miss_distance * 2)
+
                 self.delivery_phase = "done"
 
-        # Penalty for dropping when not over drop zone
+        # === PREMATURE DROP PENALTY ===
         drop_signal = action[4] > 0.5 if len(action) > 4 else False
         if drop_signal and pkg.status == PackageStatus.ATTACHED:
-            # Check if we're close to the drop zone
             dist_to_dropzone = np.linalg.norm(
                 self.sim.state.position[:2] - pkg.dropzone_position[:2]
             )
-            if dist_to_dropzone > self.package_config.drop_zone_radius * 2:
+            if dist_to_dropzone > self.package_config.drop_zone_radius * 1.5:
+                # Heavy penalty for dropping way off target
                 reward += weights['drop_penalty']
+                # Scale penalty by distance - worse drops = worse penalty
+                reward -= min(5, dist_to_dropzone)
 
         return reward
 
@@ -570,9 +644,14 @@ class DroneEnv(gym.Env):
         return None
 
     def _apply_domain_randomization(self):
-        """Apply domain randomization for sim-to-real transfer."""
+        """Apply domain randomization for sim-to-real transfer.
+
+        Randomizes both physical drone parameters AND environmental conditions
+        to make the agent robust to real-world variations.
+        """
         config = DroneConfig()
 
+        # === DRONE PHYSICAL PARAMETERS ===
         # Randomize mass (±20%)
         config.mass = self.base_config.mass * self.np_random.uniform(0.8, 1.2)
 
@@ -591,7 +670,37 @@ class DroneEnv(gym.Env):
         # Randomize motor response time (±25%)
         config.motor_time_constant = self.base_config.motor_time_constant * self.np_random.uniform(0.75, 1.25)
 
-        self.sim = DroneSimulation(config, self.package_config)
+        # === ENVIRONMENTAL CONDITIONS ===
+        env_config = EnvironmentConfig()
+
+        # Wind conditions (scales with difficulty)
+        wind_intensity = self.difficulty * self.np_random.uniform(0, 1)
+        env_config.wind_speed = wind_intensity * 3.0  # Up to 3 m/s
+        env_config.wind_direction = self.np_random.uniform(0, 2 * np.pi)
+        env_config.wind_turbulence = wind_intensity * 0.5  # Random fluctuations
+        env_config.wind_gust_probability = wind_intensity * 0.01  # Occasional gusts
+
+        # Sensor noise (simulates real sensor imperfections)
+        noise_level = self.difficulty * self.np_random.uniform(0.3, 1.0)
+        env_config.position_noise = noise_level * 0.02  # Up to 2cm std dev
+        env_config.velocity_noise = noise_level * 0.05  # Up to 5cm/s std dev
+        env_config.orientation_noise = noise_level * 0.02  # Up to ~1 degree std dev
+        env_config.motor_noise = noise_level * 0.05  # Up to 5% motor variation
+
+        # Ground effects (always present, vary strength)
+        env_config.ground_effect_height = self.np_random.uniform(0.2, 0.4)
+        env_config.ground_effect_strength = self.np_random.uniform(0.05, 0.15)
+
+        # Temperature effects (affects air density)
+        env_config.temperature_offset = self.np_random.uniform(-15, 25)  # -15C to +25C from standard
+
+        # Battery simulation (voltage sag under load)
+        env_config.battery_voltage_drop = self.np_random.uniform(0, 0.1)  # Up to 10% drop
+
+        # Store for observation noise
+        self._env_config = env_config
+
+        self.sim = DroneSimulation(config, self.package_config, env_config)
 
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info about current state."""

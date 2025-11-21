@@ -30,6 +30,36 @@ class PackageStatus(Enum):
 
 
 @dataclass
+class EnvironmentConfig:
+    """Configuration for environmental conditions (sim-to-real transfer).
+
+    Randomize these parameters during training to make the agent
+    robust to real-world variations.
+    """
+    # Wind disturbances
+    wind_speed: float = 0.0           # m/s base wind speed
+    wind_direction: float = 0.0       # radians (0 = +x direction)
+    wind_turbulence: float = 0.0      # Random wind variation intensity
+    wind_gust_probability: float = 0.0  # Chance of sudden gust per step
+
+    # Sensor noise (simulates real sensor imperfections)
+    position_noise: float = 0.0       # meters std dev
+    velocity_noise: float = 0.0       # m/s std dev
+    orientation_noise: float = 0.0    # radians std dev
+    motor_noise: float = 0.0          # Motor command noise (0-1)
+
+    # Ground effects (thrust increases near ground)
+    ground_effect_height: float = 0.3  # Height where ground effect starts
+    ground_effect_strength: float = 0.1  # Max thrust multiplier at ground
+
+    # Temperature effects (affects air density)
+    temperature_offset: float = 0.0   # Celsius offset from standard (20C)
+
+    # Battery simulation
+    battery_voltage_drop: float = 0.0  # Simulates voltage sag under load
+
+
+@dataclass
 class DroneConfig:
     """Configuration parameters for the drone simulation.
 
@@ -153,13 +183,16 @@ class DroneSimulation:
     def __init__(
         self,
         config: Optional[DroneConfig] = None,
-        package_config: Optional[PackageConfig] = None
+        package_config: Optional[PackageConfig] = None,
+        env_config: Optional[EnvironmentConfig] = None
     ):
         """Initialize the simulation with given configuration."""
         self.config = config or DroneConfig()
         self.package_config = package_config or PackageConfig()
+        self.env_config = env_config or EnvironmentConfig()
         self.state = DroneState()
         self.package: Optional[PackageState] = None
+        self._current_wind = np.zeros(3)  # Current wind velocity
         self._compute_allocation_matrix()
 
     def _compute_allocation_matrix(self):
@@ -269,8 +302,28 @@ class DroneSimulation:
 
     def _compute_forces_and_torques(self) -> Tuple[np.ndarray, np.ndarray]:
         """Compute total forces and torques on the drone."""
-        # Motor thrusts
-        motor_thrusts = self.config.motor_constant * self.state.motor_speeds ** 2
+        env = self.env_config
+
+        # Motor thrusts (with optional noise)
+        motor_speeds = self.state.motor_speeds
+        if env.motor_noise > 0:
+            noise = np.random.normal(0, env.motor_noise, 4) * motor_speeds
+            motor_speeds = np.clip(motor_speeds + noise, 0, None)
+
+        motor_thrusts = self.config.motor_constant * motor_speeds ** 2
+
+        # Ground effect - thrust increases when close to ground
+        if self.state.position[2] < env.ground_effect_height:
+            ground_factor = 1.0 + env.ground_effect_strength * (
+                1.0 - self.state.position[2] / env.ground_effect_height
+            )
+            motor_thrusts *= ground_factor
+
+        # Battery voltage drop effect (reduces thrust under load)
+        if env.battery_voltage_drop > 0:
+            load_factor = np.mean(motor_speeds) / (self.config.max_rpm * 2 * np.pi / 60)
+            voltage_factor = 1.0 - env.battery_voltage_drop * load_factor
+            motor_thrusts *= voltage_factor
 
         # Total thrust and torques from motors (body frame)
         wrench = self.allocation_matrix @ motor_thrusts
@@ -291,17 +344,75 @@ class DroneSimulation:
         # Gravity (world frame)
         gravity = np.array([0, 0, -total_mass * self.config.gravity])
 
-        # Aerodynamic drag (world frame, simplified)
-        drag = -np.array([
-            self.config.drag_coeff_xy * self.state.velocity[0],
-            self.config.drag_coeff_xy * self.state.velocity[1],
-            self.config.drag_coeff_z * self.state.velocity[2]
-        ]) * np.abs(self.state.velocity)
+        # === WIND FORCES ===
+        self._update_wind()
+        # Effective velocity relative to air
+        air_velocity = self.state.velocity - self._current_wind
+
+        # Aerodynamic drag (relative to air, not ground)
+        # Temperature affects air density
+        temp_factor = 1.0 - env.temperature_offset * 0.003  # ~0.3% per degree
+        effective_density = self.config.air_density * temp_factor
+
+        drag = -effective_density * np.array([
+            self.config.drag_coeff_xy * air_velocity[0],
+            self.config.drag_coeff_xy * air_velocity[1],
+            self.config.drag_coeff_z * air_velocity[2]
+        ]) * np.abs(air_velocity)
 
         # Total forces (world frame)
         total_forces = thrust_world + gravity + drag
 
         return total_forces, torques_body
+
+    def _update_wind(self):
+        """Update wind conditions with turbulence and gusts."""
+        env = self.env_config
+
+        if env.wind_speed == 0 and env.wind_turbulence == 0:
+            self._current_wind = np.zeros(3)
+            return
+
+        # Base wind vector
+        base_wind = np.array([
+            env.wind_speed * np.cos(env.wind_direction),
+            env.wind_speed * np.sin(env.wind_direction),
+            0.0
+        ])
+
+        # Add turbulence (random fluctuation)
+        if env.wind_turbulence > 0:
+            turbulence = np.random.normal(0, env.wind_turbulence, 3)
+            turbulence[2] *= 0.5  # Less vertical turbulence
+            base_wind += turbulence
+
+        # Random gusts
+        if env.wind_gust_probability > 0:
+            if np.random.random() < env.wind_gust_probability:
+                gust_direction = np.random.uniform(0, 2 * np.pi)
+                gust_strength = np.random.uniform(1, 3) * env.wind_speed
+                base_wind[0] += gust_strength * np.cos(gust_direction)
+                base_wind[1] += gust_strength * np.sin(gust_direction)
+
+        self._current_wind = base_wind
+
+    def get_noisy_state(self) -> DroneState:
+        """Get state with sensor noise added (for realistic observations)."""
+        env = self.env_config
+        noisy_state = self.state.copy()
+
+        if env.position_noise > 0:
+            noisy_state.position += np.random.normal(0, env.position_noise, 3)
+
+        if env.velocity_noise > 0:
+            noisy_state.velocity += np.random.normal(0, env.velocity_noise, 3)
+
+        if env.orientation_noise > 0:
+            euler = noisy_state.get_euler_angles()
+            euler += np.random.normal(0, env.orientation_noise, 3)
+            noisy_state.orientation = euler_to_quaternion(euler)
+
+        return noisy_state
 
     def _update_package(self, drop_command: bool):
         """Update package state based on drone position and drop command."""

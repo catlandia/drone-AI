@@ -360,18 +360,48 @@ class LearningSequence:
         final_score = sum(scores[k] * weights[k] for k in scores)
 
         # Determine grade
-        if final_score > 500:
-            grade = "A+ (EXCELLENT - Ready for deployment!)"
+        # Ranks from worst to best: W < F < D < C < B < A < S < P
+        # +/- variants for all except W and P
+        if final_score > 800:
+            grade = "P - PERFECT (Flawless drone! Ready for anything!)"
+        elif final_score > 700:
+            grade = "S+ - SUPREME+ (Near perfect performance!)"
+        elif final_score > 600:
+            grade = "S - SUPREME (Outstanding results!)"
+        elif final_score > 550:
+            grade = "S- - SUPREME- (Excellent, almost supreme!)"
+        elif final_score > 500:
+            grade = "A+ - ALPHA+ (Top tier performer!)"
+        elif final_score > 450:
+            grade = "A - ALPHA (Dominant performance!)"
+        elif final_score > 400:
+            grade = "A- - ALPHA- (Strong alpha potential!)"
+        elif final_score > 350:
+            grade = "B+ - BEAST+ (Impressive beast mode!)"
         elif final_score > 300:
-            grade = "A (Great - Minor improvements needed)"
+            grade = "B - BEAST (Solid beast performance!)"
+        elif final_score > 250:
+            grade = "B- - BEAST- (Emerging beast!)"
+        elif final_score > 200:
+            grade = "C+ - COOL+ (Pretty cool drone!)"
         elif final_score > 150:
-            grade = "B (Good - Needs more training)"
+            grade = "C - COOL (Decent, keeps its cool!)"
+        elif final_score > 100:
+            grade = "C- - COOL- (Barely cool, needs work!)"
+        elif final_score > 75:
+            grade = "D+ - DELUSIONAL+ (Getting somewhere...)"
         elif final_score > 50:
-            grade = "C (Average - Significant training needed)"
+            grade = "D - DELUSIONAL (Thinks it can fly...)"
+        elif final_score > 25:
+            grade = "D- - DELUSIONAL- (Very confused drone!)"
+        elif final_score > 10:
+            grade = "F+ - FAILURE+ (Failed but tried!)"
         elif final_score > 0:
-            grade = "D (Below Average - Needs much more work)"
+            grade = "F - FAILURE (Complete failure!)"
+        elif final_score > -50:
+            grade = "F- - FAILURE- (Spectacular failure!)"
         else:
-            grade = "F (Failed - Start from scratch)"
+            grade = "W - WORST (Absolutely terrible! Start over!)"
 
         return final_score, grade, scores
 

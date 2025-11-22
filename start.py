@@ -32,6 +32,26 @@ def get_env_with_pythonpath():
     return env
 
 
+def check_dependencies():
+    """Check if all required dependencies are installed."""
+    missing = []
+
+    required = [
+        ("numpy", "NumPy"),
+        ("torch", "PyTorch"),
+        ("gymnasium", "Gymnasium"),
+        ("pygame", "Pygame"),
+    ]
+
+    for module_name, display_name in required:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(display_name)
+
+    return missing
+
+
 def clear_screen():
     """Clear the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -267,11 +287,52 @@ def custom_training():
     run_command(cmd)
 
 
+def run_installer():
+    """Run the dependency installer."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    installer_path = os.path.join(script_dir, "install.py")
+
+    if os.path.exists(installer_path):
+        subprocess.run([sys.executable, installer_path])
+    else:
+        print("Installer not found. Please install dependencies manually:")
+        print("  pip install numpy torch gymnasium pygame matplotlib tensorboard pyyaml tqdm")
+        input("\nPress Enter to continue...")
+
+
 def main():
     """Main menu loop."""
     # Change to script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
+
+    # Check for missing dependencies on startup
+    missing = check_dependencies()
+    if missing:
+        clear_screen()
+        print_header()
+        print("MISSING DEPENDENCIES DETECTED")
+        print()
+        print(f"The following packages are not installed: {', '.join(missing)}")
+        print()
+        print("Would you like to run the installer?")
+        print("  [Y] Yes, install dependencies")
+        print("  [N] No, exit")
+        print()
+        choice = input("Your choice: ").strip().lower()
+
+        if choice in ['y', 'yes', '']:
+            run_installer()
+            # Re-check after installation
+            missing = check_dependencies()
+            if missing:
+                print(f"\nStill missing: {', '.join(missing)}")
+                print("Please install them manually and try again.")
+                input("Press Enter to exit...")
+                return
+        else:
+            print("\nPlease run 'python install.py' to install dependencies.")
+            return
 
     while True:
         clear_screen()

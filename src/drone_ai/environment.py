@@ -457,9 +457,17 @@ class DroneEnv(gym.Env):
         state = self.sim.state
         weights = self.reward_weights
 
-        # Position error reward (negative quadratic)
+        # Position error with "hover zone" - no penalty if within acceptable range
         pos_error = np.linalg.norm(state.position - self.target_position)
-        pos_reward = -weights['position'] * pos_error ** 2
+        hover_zone_radius = 0.5  # Acceptable range in meters
+
+        if pos_error <= hover_zone_radius:
+            # Inside hover zone - no position penalty, give bonus instead
+            pos_reward = weights['position'] * 0.5  # Positive reward for being in zone
+        else:
+            # Outside hover zone - penalize based on distance beyond zone
+            excess_error = pos_error - hover_zone_radius
+            pos_reward = -weights['position'] * excess_error ** 2
 
         # Velocity penalty (prefer low velocities for hover)
         vel_penalty = -weights['velocity'] * np.linalg.norm(state.velocity) ** 2
@@ -480,10 +488,10 @@ class DroneEnv(gym.Env):
         # Alive bonus
         alive_bonus = weights['alive']
 
-        # Success bonus (close to target)
+        # Success bonus (within hover zone and stable)
         success_bonus = 0.0
-        if pos_error < 0.1 and np.linalg.norm(state.velocity) < 0.5:
-            success_bonus = weights['success'] * 0.1  # Small per-step bonus
+        if pos_error < hover_zone_radius and np.linalg.norm(state.velocity) < 1.0:
+            success_bonus = weights['success'] * 0.2  # Bonus for stable hover in zone
 
         # Crash penalty
         crash_penalty = 0.0

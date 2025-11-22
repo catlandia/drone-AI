@@ -328,8 +328,12 @@ class DroneRenderer:
                     self.camera.free_position = self._drone_state.position + np.array([5, 5, 3])
                 print("Camera: Free roam mode (WASD + QE to move)")
             elif event.key == pygame.K_3:
-                self.camera.mode = CameraMode.FINISH
-                print("Camera: Finish point view")
+                # Finish view only available when there's a dropzone
+                if self._dropzone_position is None:
+                    print("Camera: Finish view unavailable (no dropzone in this task)")
+                else:
+                    self.camera.mode = CameraMode.FINISH
+                    print("Camera: Finish point view")
             elif event.key == pygame.K_4:
                 # FPV only available for single drone
                 if self._num_drones > 1:

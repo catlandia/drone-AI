@@ -258,10 +258,12 @@ class DroneRenderer:
         self._render_trajectory(trajectory)
         self._render_target(target)
 
-        # Render all drones
+        # Render all drones (first drone opaque, others semi-transparent)
         for i, drone_state in enumerate(self._drone_states):
             colors = self.drone_colors[i % len(self.drone_colors)]
-            self._render_drone(drone_state, colors)
+            # First drone fully visible, others 60% transparent
+            alpha = 255 if i == 0 else 150
+            self._render_drone(drone_state, colors, alpha)
 
         # Render HUD
         if self.show_hud:
@@ -550,12 +552,13 @@ class DroneRenderer:
                            (screen_pos[0], screen_pos[1] - 15),
                            (screen_pos[0], screen_pos[1] + 15), 2)
 
-    def _render_drone(self, state: DroneState, colors: tuple = None):
+    def _render_drone(self, state: DroneState, colors: tuple = None, alpha: int = 255):
         """Render the drone as a realistic quadcopter.
 
         Args:
             state: Drone state to render
             colors: Tuple of (body_color, dark_color, canopy_color) or None for defaults
+            alpha: Transparency (0-255, 255=opaque, lower=more transparent)
         """
         pos = state.position
         R = state.get_rotation_matrix()
@@ -567,6 +570,13 @@ class DroneRenderer:
             canopy_color = self.DRONE_CANOPY
         else:
             body_color, dark_color, canopy_color = colors
+
+        # Apply alpha to colors (for multiple drones, make them semi-transparent)
+        # First drone is opaque, others are semi-transparent
+        if alpha < 255:
+            body_color = (*body_color[:3], alpha)
+            dark_color = (*dark_color[:3], alpha)
+            canopy_color = (*canopy_color[:3], alpha)
 
         # Drone dimensions (scaled for visibility)
         arm_length = 0.25

@@ -560,7 +560,9 @@ class DroneSimulation:
         # Check if on ground with significant tilt
         euler = self.state.get_euler_angles()
         on_ground = self.state.position[2] < 0.05
-        tilted = abs(euler[0]) > np.pi/4 or abs(euler[1]) > np.pi/4
+        # More lenient tilt threshold - 60 degrees instead of 45
+        # This allows for more aggressive maneuvers during pickup/landing
+        severely_tilted = abs(euler[0]) > np.pi/3 or abs(euler[1]) > np.pi/3
 
         # Check for extreme velocities
         high_velocity = np.linalg.norm(self.state.velocity) > 20
@@ -569,7 +571,9 @@ class DroneSimulation:
         # Check obstacle collision
         obstacle_hit = self._obstacle_collision or self.check_obstacle_collision()
 
-        return (on_ground and tilted) or high_velocity or high_angular or obstacle_hit
+        # Only crash if on ground with SEVERE tilt, or extreme velocities
+        # Being on ground without severe tilt is OK (for starting/landing)
+        return (on_ground and severely_tilted) or high_velocity or high_angular or obstacle_hit
 
     def check_obstacle_collision(self) -> bool:
         """Check if drone collides with any obstacle."""

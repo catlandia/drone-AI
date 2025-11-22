@@ -87,9 +87,11 @@ def print_menu():
     print("  [2] Train - Delivery (pickup and drop)")
     print("  [3] Train - Delivery Route (1km with obstacles)")
     print()
-    print("  [4] Watch Demo (no training)")
-    print("  [5] Evaluate a trained model")
-    print("  [6] Custom training (advanced)")
+    print("  [4] Evolutionary Training (best drone survives!)")
+    print()
+    print("  [5] Watch Demo (no training)")
+    print("  [6] Evaluate a trained model")
+    print("  [7] Custom training (advanced)")
     print()
     print("  [0] Exit")
     print()
@@ -236,6 +238,51 @@ def train_delivery_route():
 
     if randomization == 'y':
         cmd.append("--domain-randomization")
+
+    run_command(cmd)
+
+
+def train_evolutionary():
+    """Start evolutionary training - best drone survives!"""
+    clear_screen()
+    print_header()
+    print("EVOLUTIONARY TRAINING")
+    print()
+    print("How it works:")
+    print("  - Multiple drones train simultaneously (population)")
+    print("  - After each 'age', drones are evaluated by fitness (reward)")
+    print("  - Best performers are selected and mutated")
+    print("  - Poor performers are replaced with mutated copies of winners")
+    print("  - Over time, the BEST drone emerges through survival of the fittest!")
+    print()
+    print("All drones are visualized (semi-transparent) so you can watch evolution!")
+    print()
+
+    task = input("Task (hover/delivery/delivery_route, default hover): ").strip()
+    task = task if task else "hover"
+
+    population = input("Population size - number of drones (default 8): ").strip()
+    population = population if population else "8"
+
+    ages = input("Number of ages/generations (default 50): ").strip()
+    ages = ages if ages else "50"
+
+    steps_per_age = input("Steps per age (default 10000): ").strip()
+    steps_per_age = steps_per_age if steps_per_age else "10000"
+
+    difficulty = input("Difficulty 0.0-1.0 (default 0.3): ").strip()
+    difficulty = difficulty if difficulty else "0.3"
+
+    cmd = [
+        sys.executable, "-m", "drone_ai.evolutionary_train",
+        "--task", task,
+        "--population-size", population,
+        "--num-ages", ages,
+        "--steps-per-age", steps_per_age,
+        "--difficulty", difficulty,
+        "--render",
+        "--render-freq", "10"
+    ]
 
     run_command(cmd)
 
@@ -391,10 +438,12 @@ def main():
         elif choice == "3":
             train_delivery_route()
         elif choice == "4":
-            watch_demo()
+            train_evolutionary()
         elif choice == "5":
-            evaluate_model()
+            watch_demo()
         elif choice == "6":
+            evaluate_model()
+        elif choice == "7":
             custom_training()
         elif choice == "0":
             print("\nGoodbye!")

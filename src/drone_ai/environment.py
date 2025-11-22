@@ -1008,11 +1008,21 @@ class DroneEnv(gym.Env):
 
     def _get_initial_position(self) -> np.ndarray:
         """Get initial position with optional randomization."""
-        base = np.array([0.0, 0.0, 1.0])
+        # For DELIVERY task, spawn at the pickup zone (purple zone) ON THE GROUND
+        if self.task == TaskType.DELIVERY:
+            base = self.pickup_position.copy()
+            base[2] = 0.1  # Start on ground (just slightly above to avoid collision)
+        elif self.task == TaskType.DELIVERY_ROUTE:
+            base = self.base_position.copy()
+            base[2] = 0.1  # Start on ground at base
+        else:
+            base = np.array([0.0, 0.0, 1.0])  # Hover task starts in air
+
         if self.difficulty > 0.3:
-            noise = self.np_random.uniform(-0.5, 0.5, 3) * self.difficulty
-            noise[2] = abs(noise[2])  # Keep z positive
+            noise = self.np_random.uniform(-0.3, 0.3, 3) * self.difficulty
+            noise[2] = abs(noise[2]) * 0.5  # Smaller vertical noise for ground starts
             base += noise
+            base[2] = max(0.1, base[2])  # Never go below ground
         return base
 
     def _get_initial_velocity(self) -> np.ndarray:

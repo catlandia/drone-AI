@@ -38,23 +38,26 @@ class DroneEnv(gym.Env):
     """
     Gymnasium environment for drone flight control.
 
-    Observation Space (19-26 dimensions depending on task):
-        Base (19 dims):
-        - Position (3): x, y, z in world frame
-        - Velocity (3): vx, vy, vz in world frame
+    Observation Space (always 31 dimensions for consistent network architecture):
+        Base (20 dims):
+        - Position (3): x, y, z in world frame (normalized)
+        - Velocity (3): vx, vy, vz in world frame (normalized)
         - Orientation (3): roll, pitch, yaw angles
-        - Angular velocity (3): p, q, r in body frame
-        - Target position (3): relative target in world frame
-        - Previous action (4): last motor commands
+        - Angular velocity (3): p, q, r in body frame (normalized)
+        - Target position (3): relative target in world frame (normalized)
+        - Previous action (5): last motor commands + drop signal
 
-        Delivery task adds (7 dims):
-        - Package status (1): 0=waiting, 1=attached, 2=dropping, 3=delivered, 4=missed
+        Extended (11 dims, filled based on task):
+        - Package status (1): 0=waiting, 0.25=attached, 0.5=dropping, 0.75=delivered, 1=missed
         - Has package (1): binary flag
-        - Pickup position relative (3): relative to drone
-        - Dropzone position relative (3): relative to drone
+        - Location 1 relative (3): pickup/base position relative to drone
+        - Location 2 relative (3): dropzone position relative to drone
+        - Deliveries completed (1): normalized count
+        - Drop prediction (1): predicted accuracy if dropped now
+        - Obstacle proximity (1): distance to nearest obstacle
 
     Action Space:
-        Standard tasks (4 dims): Motor commands [0, 1]
+        Standard tasks (4 dims): Motor commands [0, 1] (internally padded to 5)
         Delivery task (5 dims): Motor commands [0, 1] + drop signal [0, 1]
 
     Rewards:
@@ -121,17 +124,13 @@ class DroneEnv(gym.Env):
                 dtype=np.float32
             )
 
-        # Define observation space based on task
-        # Base: [position(3), velocity(3), euler(3), angular_vel(3), target_rel(3), prev_action(4/5)]
-        if task == TaskType.DELIVERY:
-            # Add: package_status(1), has_package(1), pickup_rel(3), dropzone_rel(3)
-            obs_dim = 19 + 1 + 8  # 28 total (prev_action is 5 for delivery)
-        elif task == TaskType.DELIVERY_ROUTE:
-            # Add: package_status(1), has_package(1), base_rel(3), dropzone_rel(3),
-            #      deliveries_completed(1), drop_prediction(1), obstacle_proximity(1)
-            obs_dim = 19 + 1 + 11  # 31 total
-        else:
-            obs_dim = 19
+        # Define observation space - ALWAYS 31 dims for consistent network architecture
+        # This allows progressive curriculum learning across all task types.
+        # Base: [position(3), velocity(3), euler(3), angular_vel(3), target_rel(3), prev_action(5)]
+        # Extended: [pkg_status(1), has_package(1), location1_rel(3), location2_rel(3),
+        #            deliveries_completed(1), drop_prediction(1), obstacle_proximity(1)]
+        # Total: 20 (base) + 11 (extended) = 31
+        obs_dim = 31  # Fixed size for all tasks
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -169,7 +168,7 @@ class DroneEnv(gym.Env):
 
         # Episode state
         self.step_count = 0
-        self.prev_action = np.zeros(5 if task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE] else 4)
+        self.prev_action = np.zeros(5)  # Always 5 dims for consistent observation space
         self.episode_reward = 0.0
         self.position_history: List[np.ndarray] = []
 
@@ -293,10 +292,8 @@ class DroneEnv(gym.Env):
         # Reset episode state
         self.step_count = 0
         hover_action = self.sim.compute_hover_action()
-        if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
-            self.prev_action = np.concatenate([hover_action, [0.0]])  # Add drop signal
-        else:
-            self.prev_action = hover_action
+        # Always use 5-dim action for consistent observation space
+        self.prev_action = np.concatenate([hover_action, [0.0]])  # 4 motors + drop signal
         self.episode_reward = 0.0
         self.position_history = [self.sim.state.position.copy()]
 
@@ -312,13 +309,17 @@ class DroneEnv(gym.Env):
         # Clip action to valid range
         action = np.clip(action, 0, 1).astype(np.float32)
 
+        # Ensure action is always 5 dimensions for consistent observation space
+        if len(action) == 4:
+            action = np.concatenate([action, [0.0]])  # Add zero drop signal
+
         # Handle delivery task with drop signal
         if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
             motor_action = action[:4]
             drop_signal = action[4] > 0.5  # Threshold for drop command
             self.sim.step(motor_action, drop_package=drop_signal)
         else:
-            self.sim.step(action)
+            self.sim.step(action[:4])  # Only use motor commands
 
         # Record position for trajectory visualization
         self.position_history.append(self.sim.state.position.copy())
@@ -334,7 +335,7 @@ class DroneEnv(gym.Env):
         # Update task state (e.g., move to next waypoint)
         self._update_task()
 
-        # Store action for smoothness penalty
+        # Store action for smoothness penalty (always 5 dims)
         self.prev_action = action.copy()
 
         observation = self._get_observation()
@@ -343,7 +344,13 @@ class DroneEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def _get_observation(self) -> np.ndarray:
-        """Construct observation vector from current state."""
+        """Construct observation vector from current state.
+
+        Always returns 31 dimensions for consistent network architecture:
+        - Base (20): position(3), velocity(3), euler(3), angular_vel(3), target_rel(3), prev_action(5)
+        - Extended (11): pkg_status(1), has_package(1), location1_rel(3), location2_rel(3),
+                         deliveries_completed(1), drop_prediction(1), obstacle_proximity(1)
+        """
         state = self.sim.state
 
         # Position (normalized by typical operating range)
@@ -361,24 +368,33 @@ class DroneEnv(gym.Env):
         # Relative target position
         target_rel = (self.target_position - state.position) / 5.0
 
-        # Previous action
+        # Previous action (always 5 dims)
         prev_action = self.prev_action
 
-        # Base observation
+        # Base observation (20 dims)
         base_obs = [
-            position,
-            velocity,
-            euler,
-            angular_velocity,
-            target_rel,
-            prev_action
+            position,           # 3
+            velocity,           # 3
+            euler,              # 3
+            angular_velocity,   # 3
+            target_rel,         # 3
+            prev_action         # 5
         ]
 
-        # Add delivery-specific observations
+        # Extended observations (11 dims) - filled based on task type
+        # Default values for non-delivery tasks
+        pkg_status = np.array([0.0])
+        has_package = np.array([0.0])
+        location1_rel = np.zeros(3)  # pickup/base position relative
+        location2_rel = np.zeros(3)  # dropzone position relative
+        deliveries_norm = np.array([0.0])
+        drop_prediction = np.array([2.0])  # No package/not applicable
+        obstacle_proximity = np.array([1.0])  # No obstacles
+
+        # Fill in delivery-specific observations
         if self.task == TaskType.DELIVERY:
             pkg = self.sim.get_package_state()
             if pkg is not None:
-                # Package status as normalized value (0-4 -> 0-1)
                 status_map = {
                     PackageStatus.WAITING: 0.0,
                     PackageStatus.ATTACHED: 0.25,
@@ -387,25 +403,10 @@ class DroneEnv(gym.Env):
                     PackageStatus.MISSED: 1.0
                 }
                 pkg_status = np.array([status_map.get(pkg.status, 0.0)])
-
-                # Has package flag
                 has_package = np.array([1.0 if self.sim.has_package() else 0.0])
+                location1_rel = (pkg.pickup_position - state.position) / 5.0
+                location2_rel = (pkg.dropzone_position - state.position) / 5.0
 
-                # Relative positions to pickup and dropzone
-                pickup_rel = (pkg.pickup_position - state.position) / 5.0
-                dropzone_rel = (pkg.dropzone_position - state.position) / 5.0
-
-                base_obs.extend([pkg_status, has_package, pickup_rel, dropzone_rel])
-            else:
-                # No package, add zeros
-                base_obs.extend([
-                    np.zeros(1),  # status
-                    np.zeros(1),  # has_package
-                    np.zeros(3),  # pickup_rel
-                    np.zeros(3),  # dropzone_rel
-                ])
-
-        # Add delivery route observations (long-range)
         elif self.task == TaskType.DELIVERY_ROUTE:
             pkg = self.sim.get_package_state()
             status_map = {
@@ -418,35 +419,34 @@ class DroneEnv(gym.Env):
             if pkg is not None:
                 pkg_status = np.array([status_map.get(pkg.status, 0.0)])
                 has_package = np.array([1.0 if self.sim.has_package() else 0.0])
-            else:
-                pkg_status = np.array([0.0])
-                has_package = np.array([0.0])
 
             # Relative positions to base and dropzone (normalized for longer distances)
-            base_rel = (self.base_position - state.position) / self.route_distance
-            dropzone_rel = (self.dropzone_position - state.position) / self.route_distance
+            location1_rel = (self.base_position - state.position) / self.route_distance
+            location2_rel = (self.dropzone_position - state.position) / self.route_distance
 
             # Number of deliveries completed (normalized)
-            deliveries_norm = np.array([self.deliveries_completed / 10.0])  # Assume max ~10 deliveries
+            deliveries_norm = np.array([self.deliveries_completed / 10.0])
 
             # PREDICTIVE DROP: How accurate would a drop be right now?
-            # This helps the drone learn WHEN to release while moving
             if self.sim.has_package():
                 pred_accuracy = self.sim.get_drop_accuracy_prediction(self.dropzone_position)
-                # Normalize: 0 = perfect, 1 = at accuracy radius, >1 = would miss
                 drop_prediction = np.array([min(2.0, pred_accuracy / self.drop_accuracy_radius)])
-            else:
-                drop_prediction = np.array([2.0])  # No package, max value
 
             # Nearest obstacle distance (normalized)
             if self.obstacles:
                 nearest_obs = self.sim.get_nearest_obstacle_distance()
-                obstacle_proximity = np.array([min(1.0, nearest_obs / 20.0)])  # Normalize to 20m
-            else:
-                obstacle_proximity = np.array([1.0])  # No obstacles
+                obstacle_proximity = np.array([min(1.0, nearest_obs / 20.0)])
 
-            base_obs.extend([pkg_status, has_package, base_rel, dropzone_rel,
-                           deliveries_norm, drop_prediction, obstacle_proximity])
+        # Combine all observations (always 31 dims)
+        base_obs.extend([
+            pkg_status,         # 1
+            has_package,        # 1
+            location1_rel,      # 3
+            location2_rel,      # 3
+            deliveries_norm,    # 1
+            drop_prediction,    # 1
+            obstacle_proximity  # 1
+        ])
 
         observation = np.concatenate(base_obs).astype(np.float32)
 
@@ -480,8 +480,9 @@ class DroneEnv(gym.Env):
         ang_vel_penalty = -weights['angular_velocity'] * np.linalg.norm(state.angular_velocity) ** 2
 
         # Action smoothness (penalize jerky control)
-        motor_action = action[:4] if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE] else action
-        prev_motor = self.prev_action[:4] if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE] else self.prev_action
+        # Actions are always 5 dims now, use first 4 for motor smoothness
+        motor_action = action[:4]
+        prev_motor = self.prev_action[:4]
         action_diff = np.linalg.norm(motor_action - prev_motor)
         smoothness_penalty = -weights['action_smoothness'] * action_diff ** 2
 

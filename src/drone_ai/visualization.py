@@ -13,7 +13,7 @@ using Pygame. Features include:
 
 import numpy as np
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 
 try:
@@ -23,7 +23,7 @@ try:
 except ImportError:
     PYGAME_AVAILABLE = False
 
-from drone_ai.simulation import DroneState, PackageState, PackageStatus
+from drone_ai.simulation import DroneState, PackageState, PackageStatus, Obstacle
 
 
 @dataclass
@@ -68,6 +68,16 @@ class DroneRenderer:
     PICKUP_ZONE = (100, 255, 255)  # Cyan pickup zone
     DROPZONE = (255, 100, 255)     # Magenta drop zone
     DROPZONE_SUCCESS = (50, 255, 50)  # Green on successful delivery
+    # Obstacles and waypoints
+    OBSTACLE_TREE = (34, 139, 34)     # Forest green
+    OBSTACLE_BUILDING = (105, 105, 105)  # Gray
+    OBSTACLE_POLE = (139, 69, 19)     # Brown
+    WAYPOINT = (255, 255, 0)          # Yellow
+    WAYPOINT_REACHED = (100, 100, 100)  # Gray (already passed)
+    # Training metrics
+    METRIC_GOOD = (50, 255, 50)    # Green
+    METRIC_BAD = (255, 50, 50)     # Red
+    METRIC_NEUTRAL = (255, 255, 50)  # Yellow
 
     def __init__(
         self,
@@ -111,7 +121,11 @@ class DroneRenderer:
         target: np.ndarray,
         trajectory: List[np.ndarray],
         package: Optional[PackageState] = None,
-        dropzone_radius: float = 0.3
+        dropzone_radius: float = 0.3,
+        obstacles: Optional[List[Obstacle]] = None,
+        waypoints: Optional[List[np.ndarray]] = None,
+        current_waypoint_idx: int = 0,
+        training_metrics: Optional[Dict] = None
     ):
         """Render the current state.
 
@@ -121,6 +135,10 @@ class DroneRenderer:
             trajectory: List of past positions
             package: Optional package state for delivery task
             dropzone_radius: Radius of the drop zone
+            obstacles: List of obstacles to render
+            waypoints: List of waypoint positions
+            current_waypoint_idx: Index of current target waypoint
+            training_metrics: Dict with training stats to display
         """
         # Handle pygame events
         for event in pygame.event.get():
@@ -142,6 +160,14 @@ class DroneRenderer:
         # Render 3D scene
         self._render_ground()
 
+        # Render obstacles
+        if obstacles:
+            self._render_obstacles(obstacles)
+
+        # Render waypoints
+        if waypoints:
+            self._render_waypoints(waypoints, current_waypoint_idx)
+
         # Render delivery elements if package exists
         if package is not None:
             self._render_delivery_zones(package, dropzone_radius)
@@ -153,7 +179,7 @@ class DroneRenderer:
 
         # Render HUD
         if self.show_hud:
-            self._render_hud(state, target, package)
+            self._render_hud(state, target, package, training_metrics)
 
         # Update display
         if not self.headless:
@@ -340,6 +366,88 @@ class DroneRenderer:
             if forward_screen:
                 pygame.draw.line(self.screen, (255, 255, 100), center_screen, forward_screen, 2)
 
+    def _render_obstacles(self, obstacles: List[Obstacle]):
+        """Render obstacles as 3D cylinders."""
+        for obstacle in obstacles:
+            # Choose color based on type
+            if obstacle.obstacle_type == "tree":
+                color = self.OBSTACLE_TREE
+            elif obstacle.obstacle_type == "building":
+                color = self.OBSTACLE_BUILDING
+            else:  # pole
+                color = self.OBSTACLE_POLE
+
+            # Draw cylinder as vertical lines and circles
+            n_segments = 12
+            base_points = []
+            top_points = []
+
+            for i in range(n_segments):
+                angle = 2 * np.pi * i / n_segments
+                base_point = obstacle.position + np.array([
+                    obstacle.radius * np.cos(angle),
+                    obstacle.radius * np.sin(angle),
+                    0
+                ])
+                top_point = base_point.copy()
+                top_point[2] = obstacle.height
+
+                base_screen = self._world_to_screen(base_point)
+                top_screen = self._world_to_screen(top_point)
+
+                if base_screen:
+                    base_points.append(base_screen)
+                if top_screen:
+                    top_points.append(top_screen)
+
+                # Draw vertical edge lines (every 3rd segment for performance)
+                if i % 3 == 0 and base_screen and top_screen:
+                    pygame.draw.line(self.screen, color, base_screen, top_screen, 1)
+
+            # Draw base and top circles
+            if len(base_points) >= 3:
+                pygame.draw.polygon(self.screen, (*color[:3], 100), base_points, 0)
+                pygame.draw.lines(self.screen, color, True, base_points, 1)
+            if len(top_points) >= 3:
+                pygame.draw.lines(self.screen, color, True, top_points, 2)
+
+    def _render_waypoints(self, waypoints: List[np.ndarray], current_idx: int):
+        """Render waypoints as markers."""
+        for i, waypoint in enumerate(waypoints):
+            # Choose color: passed waypoints are gray, current is yellow, future are dimmer
+            if i < current_idx:
+                color = self.WAYPOINT_REACHED
+                size = 6
+            elif i == current_idx:
+                color = self.WAYPOINT
+                size = 10
+            else:
+                color = (*self.WAYPOINT[:3],)  # Dimmer yellow
+                size = 8
+
+            screen_pos = self._world_to_screen(waypoint)
+            if screen_pos:
+                # Draw diamond shape for waypoint
+                points = [
+                    (screen_pos[0], screen_pos[1] - size),
+                    (screen_pos[0] + size, screen_pos[1]),
+                    (screen_pos[0], screen_pos[1] + size),
+                    (screen_pos[0] - size, screen_pos[1]),
+                ]
+                pygame.draw.polygon(self.screen, color, points)
+                pygame.draw.polygon(self.screen, (255, 255, 255), points, 1)
+
+                # Draw waypoint number
+                wp_text = self.font.render(str(i + 1), True, (255, 255, 255))
+                self.screen.blit(wp_text, (screen_pos[0] + size + 2, screen_pos[1] - 8))
+
+            # Draw line to next waypoint
+            if i < len(waypoints) - 1:
+                next_screen = self._world_to_screen(waypoints[i + 1])
+                if screen_pos and next_screen:
+                    line_color = self.WAYPOINT_REACHED if i < current_idx else (100, 100, 50)
+                    pygame.draw.line(self.screen, line_color, screen_pos, next_screen, 1)
+
     def _render_delivery_zones(self, package: PackageState, dropzone_radius: float):
         """Render pickup and drop zones for delivery task."""
         # Pickup zone (cyan circle on ground)
@@ -438,11 +546,17 @@ class DroneRenderer:
             pygame.draw.rect(self.screen, (255, 255, 255),
                            (screen_pos[0] - size//2, screen_pos[1] - size//2, size, size), 1)
 
-    def _render_hud(self, state: DroneState, target: np.ndarray, package: Optional[PackageState] = None):
+    def _render_hud(self, state: DroneState, target: np.ndarray,
+                    package: Optional[PackageState] = None,
+                    training_metrics: Optional[Dict] = None):
         """Render heads-up display."""
-        # Background panel - taller if showing package info
+        # Background panel - taller if showing package info or training metrics
         panel_width = 200
-        panel_height = 230 if package is not None else 180
+        panel_height = 180
+        if package is not None:
+            panel_height += 50
+        if training_metrics is not None:
+            panel_height += 100
         panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
         panel_surface.fill((0, 0, 0, 150))
         self.screen.blit(panel_surface, (10, 10))
@@ -498,6 +612,51 @@ class DroneRenderer:
             dz_text = f"Dropzone: {dropzone_dist:.2f} m"
             text = self.font.render(dz_text, True, self.DROPZONE)
             self.screen.blit(text, (20, 200))
+            y_offset = 225
+        else:
+            y_offset = 175
+
+        # Training metrics (if provided)
+        if training_metrics is not None:
+            # Separator line
+            pygame.draw.line(self.screen, (100, 100, 100), (20, y_offset), (190, y_offset), 1)
+            y_offset += 10
+
+            # Episode count
+            episodes = training_metrics.get('episodes', 0)
+            ep_text = f"Episodes: {episodes}"
+            text = self.font.render(ep_text, True, self.TEXT_COLOR)
+            self.screen.blit(text, (20, y_offset))
+            y_offset += 25
+
+            # Current reward
+            reward = training_metrics.get('episode_reward', 0)
+            reward_color = self.METRIC_GOOD if reward > 0 else self.METRIC_BAD if reward < -10 else self.METRIC_NEUTRAL
+            rew_text = f"Reward: {reward:.1f}"
+            text = self.font.render(rew_text, True, reward_color)
+            self.screen.blit(text, (20, y_offset))
+            y_offset += 25
+
+            # Mean reward
+            mean_reward = training_metrics.get('mean_reward', 0)
+            mean_color = self.METRIC_GOOD if mean_reward > 0 else self.METRIC_BAD if mean_reward < -10 else self.METRIC_NEUTRAL
+            mean_text = f"Mean: {mean_reward:.1f}"
+            text = self.font.render(mean_text, True, mean_color)
+            self.screen.blit(text, (20, y_offset))
+            y_offset += 25
+
+            # Success rate or deliveries
+            if 'deliveries_successful' in training_metrics:
+                deliveries = training_metrics.get('deliveries_successful', 0)
+                total = training_metrics.get('deliveries_completed', 0)
+                del_text = f"Deliveries: {deliveries}/{total}"
+                text = self.font.render(del_text, True, self.METRIC_GOOD if deliveries > 0 else self.TEXT_COLOR)
+                self.screen.blit(text, (20, y_offset))
+            elif 'success_rate' in training_metrics:
+                success = training_metrics.get('success_rate', 0) * 100
+                sr_text = f"Success: {success:.0f}%"
+                text = self.font.render(sr_text, True, self.METRIC_GOOD if success > 50 else self.METRIC_BAD)
+                self.screen.blit(text, (20, y_offset))
 
         # Controls help (bottom of screen)
         help_text = "Arrow keys: rotate | +/-: zoom | Space: follow | T: trajectory | H: HUD"

@@ -68,6 +68,12 @@ def parse_args():
     parser.add_argument("--eval-episodes", type=int, default=10,
                        help="Number of evaluation episodes")
 
+    # Visualization
+    parser.add_argument("--render", action="store_true",
+                       help="Enable live visualization during training")
+    parser.add_argument("--render-freq", type=int, default=1,
+                       help="Render every N steps (1=every step, higher=faster training)")
+
     # Misc
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
@@ -140,12 +146,68 @@ class Trainer:
         self.episode_lengths = []
         self.success_rate = 0.0
 
+        # Visualization
+        self.renderer = None
+        if args.render:
+            from drone_ai.visualization import DroneRenderer
+            self.renderer = DroneRenderer(width=1024, height=768)
+            print("Live visualization enabled")
+
     def _create_env(self, difficulty: float) -> DroneEnv:
         """Create environment with given difficulty."""
         return DroneEnv(
             task=self.task,
             difficulty=difficulty,
             domain_randomization=self.args.domain_randomization
+        )
+
+    def _render_frame(self, episode_reward: float):
+        """Render the current frame with training metrics."""
+        # Get current state
+        state = self.env.sim.state
+        target = self.env.target_position
+
+        # Build training metrics dict
+        mean_reward = np.mean(self.episode_rewards[-10:]) if self.episode_rewards else 0
+        training_metrics = {
+            'episodes': self.episodes,
+            'episode_reward': episode_reward,
+            'mean_reward': mean_reward,
+            'total_steps': self.total_steps,
+        }
+
+        # Add task-specific metrics
+        if self.task == TaskType.DELIVERY_ROUTE:
+            training_metrics['deliveries_successful'] = self.env.deliveries_successful
+            training_metrics['deliveries_completed'] = self.env.deliveries_completed
+
+        # Get optional elements based on task
+        package = None
+        obstacles = None
+        waypoints = None
+        current_waypoint_idx = 0
+        dropzone_radius = 0.3
+
+        if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
+            package = self.env.sim.get_package_state()
+            dropzone_radius = self.env.drop_accuracy_radius if hasattr(self.env, 'drop_accuracy_radius') else 0.3
+
+        if self.task == TaskType.DELIVERY_ROUTE:
+            obstacles = self.env.obstacles
+            waypoints = self.env.route_waypoints
+            current_waypoint_idx = self.env.current_waypoint_idx
+
+        # Render
+        self.renderer.render(
+            state=state,
+            target=target,
+            trajectory=self.env.position_history,
+            package=package,
+            dropzone_radius=dropzone_radius,
+            obstacles=obstacles,
+            waypoints=waypoints,
+            current_waypoint_idx=current_waypoint_idx,
+            training_metrics=training_metrics
         )
 
     def train(self):
@@ -183,6 +245,10 @@ class Trainer:
                 episode_reward += reward
                 episode_length += 1
                 self.total_steps += 1
+
+                # Live visualization
+                if self.renderer is not None and self.total_steps % self.args.render_freq == 0:
+                    self._render_frame(episode_reward)
 
                 if done:
                     # Record episode stats

@@ -348,25 +348,69 @@ def main():
             evaluator.disconnect()
 
     elif args.mode == "visualization":
-        # Visualization demo
+        # Visualization demo with full rendering
         from drone_ai.visualization import DroneRenderer
 
         env = DroneEnv(
             task=TaskType(args.task),
-            difficulty=args.difficulty,
-            render_mode="human"
+            difficulty=args.difficulty
         )
+
+        renderer = DroneRenderer(width=1024, height=768)
 
         obs, info = env.reset()
         done = False
+        episode_reward = 0
 
         print("Running visualization... Press ESC to exit")
+        print("Controls: Arrow keys=rotate, +/-=zoom, Space=follow, T=trajectory, H=HUD")
 
         while not done:
             action, _ = agent.select_action(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
+            episode_reward += reward
             done = terminated or truncated
-            env.render()
+
+            # Get rendering elements based on task
+            package = None
+            obstacles = None
+            waypoints = None
+            current_waypoint_idx = 0
+            dropzone_radius = 0.3
+
+            if args.task in ["delivery", "delivery_route"]:
+                package = env.sim.get_package_state()
+                dropzone_radius = getattr(env, 'drop_accuracy_radius', 0.3)
+
+            if args.task == "delivery_route":
+                obstacles = env.obstacles
+                waypoints = env.route_waypoints
+                current_waypoint_idx = env.current_waypoint_idx
+
+            # Training metrics for display
+            metrics = {
+                'episode_reward': episode_reward,
+                'mean_reward': episode_reward,
+                'episodes': 1,
+            }
+            if args.task == "delivery_route":
+                metrics['deliveries_successful'] = env.deliveries_successful
+                metrics['deliveries_completed'] = env.deliveries_completed
+
+            renderer.render(
+                state=env.sim.state,
+                target=env.target_position,
+                trajectory=env.position_history,
+                package=package,
+                dropzone_radius=dropzone_radius,
+                obstacles=obstacles,
+                waypoints=waypoints,
+                current_waypoint_idx=current_waypoint_idx,
+                training_metrics=metrics
+            )
+
+        renderer.close()
+        print(f"\nEpisode finished. Total reward: {episode_reward:.1f}")
 
     # Save results
     if args.mode in ["simulation", "hardware"]:

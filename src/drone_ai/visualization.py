@@ -107,6 +107,9 @@ class DroneRenderer:
     METRIC_GOOD = (50, 255, 50)    # Green
     METRIC_BAD = (255, 50, 50)     # Red
     METRIC_NEUTRAL = (255, 255, 50)  # Yellow
+    # Hover zone (10% visible - very transparent)
+    HOVER_ZONE = (100, 255, 100)   # Light green bubble
+    HOVER_ZONE_ALPHA = 25          # 10% opacity (255 * 0.10 ≈ 25)
 
     def __init__(
         self,
@@ -278,6 +281,7 @@ class DroneRenderer:
             self._render_package(package, state)
 
         self._render_trajectory(trajectory)
+        self._render_hover_zone(target, radius=0.5)  # 10% visible hover zone bubble
         self._render_target(target)
 
         # Render all drones (first drone opaque, others semi-transparent)
@@ -573,6 +577,89 @@ class DroneRenderer:
             pygame.draw.line(self.screen, self.TARGET,
                            (screen_pos[0], screen_pos[1] - 15),
                            (screen_pos[0], screen_pos[1] + 15), 2)
+
+    def _render_hover_zone(self, target: np.ndarray, radius: float = 0.5):
+        """Render the hover zone as a semi-transparent sphere (10% visible).
+
+        The hover zone is the 0.5m radius area where the drone should stay.
+        """
+        # Draw the sphere as multiple circles at different heights (layers)
+        n_layers = 8
+        n_segments = 16
+
+        # Create a surface for semi-transparent drawing
+        temp_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+
+        for layer in range(n_layers + 1):
+            # Calculate height and radius of this layer's circle
+            # Sphere equation: r^2 = R^2 - z^2, where R is sphere radius
+            z_offset = -radius + (2 * radius * layer / n_layers)
+            layer_radius = np.sqrt(max(0, radius**2 - z_offset**2))
+
+            if layer_radius < 0.01:
+                continue
+
+            # Get circle points at this height
+            layer_center = target.copy()
+            layer_center[2] += z_offset
+
+            circle_points = []
+            for i in range(n_segments + 1):
+                angle = 2 * np.pi * i / n_segments
+                point = layer_center + np.array([
+                    layer_radius * np.cos(angle),
+                    layer_radius * np.sin(angle),
+                    0
+                ])
+                screen_point = self._world_to_screen(point)
+                if screen_point:
+                    circle_points.append(screen_point)
+
+            # Draw this layer's circle
+            if len(circle_points) >= 3:
+                # Fill with very transparent color
+                pygame.draw.polygon(temp_surface,
+                                  (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA),
+                                  circle_points)
+                # Draw outline slightly more visible
+                pygame.draw.lines(temp_surface,
+                                (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 2),
+                                True, circle_points, 1)
+
+        # Also draw vertical lines connecting top to bottom for 3D effect
+        for i in range(0, n_segments, 2):  # Every other segment for performance
+            angle = 2 * np.pi * i / n_segments
+            top_point = target + np.array([
+                radius * np.cos(angle) * 0.1,  # Small radius at top
+                radius * np.sin(angle) * 0.1,
+                radius
+            ])
+            mid_point = target + np.array([
+                radius * np.cos(angle),
+                radius * np.sin(angle),
+                0
+            ])
+            bottom_point = target + np.array([
+                radius * np.cos(angle) * 0.1,
+                radius * np.sin(angle) * 0.1,
+                -radius
+            ])
+
+            top_screen = self._world_to_screen(top_point)
+            mid_screen = self._world_to_screen(mid_point)
+            bottom_screen = self._world_to_screen(bottom_point)
+
+            if top_screen and mid_screen:
+                pygame.draw.line(temp_surface,
+                               (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 2),
+                               top_screen, mid_screen, 1)
+            if mid_screen and bottom_screen:
+                pygame.draw.line(temp_surface,
+                               (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 2),
+                               mid_screen, bottom_screen, 1)
+
+        # Blit the transparent surface onto the main screen
+        self.screen.blit(temp_surface, (0, 0))
 
     def _render_drone(self, state: DroneState, colors: tuple = None, alpha: int = 255):
         """Render the drone as a realistic quadcopter.

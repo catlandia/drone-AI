@@ -579,10 +579,10 @@ class DroneRenderer:
                            (screen_pos[0], screen_pos[1] + 15), 2)
 
     def _render_hover_zone(self, target: np.ndarray, radius: float = 0.5):
-        """Render the hover zone as a semi-transparent sphere (10% visible).
+        """Render the hover zone as a visible sphere outline.
 
         The hover zone is the 0.5m radius area where the drone should stay.
-        Draws directly on screen for visibility.
+        Uses bright cyan color for maximum visibility.
         """
         # Get the center point on screen
         center_screen = self._world_to_screen(target)
@@ -599,23 +599,45 @@ class DroneRenderer:
         else:
             # Calculate screen-space radius
             screen_radius = abs(edge_screen[0] - center_screen[0])
-            screen_radius = max(20, min(screen_radius, 200))  # Clamp to reasonable size
+            screen_radius = max(30, min(screen_radius, 250))  # Clamp to reasonable size
 
-        # Draw the hover zone as concentric circles (wireframe sphere effect)
-        line_color = self.HOVER_ZONE  # (100, 255, 100) - light green
+        # Use bright cyan for maximum visibility against dark background
+        bright_cyan = (0, 255, 255)
+        bright_yellow = (255, 255, 0)
 
-        # Main circle (equator)
-        pygame.draw.circle(self.screen, line_color, center_screen, int(screen_radius), 2)
+        # Create a temporary surface for semi-transparent fill
+        zone_surface = pygame.Surface((int(screen_radius * 2 + 10), int(screen_radius * 2 + 10)), pygame.SRCALPHA)
+        zone_center = (int(screen_radius + 5), int(screen_radius + 5))
 
-        # Smaller circles for top/bottom effect
-        pygame.draw.circle(self.screen, line_color, center_screen, int(screen_radius * 0.7), 1)
-        pygame.draw.circle(self.screen, line_color, center_screen, int(screen_radius * 0.4), 1)
+        # Draw semi-transparent filled circle (10% opacity)
+        pygame.draw.circle(zone_surface, (0, 255, 255, 25), zone_center, int(screen_radius))
 
-        # Cross lines through center for visibility
+        # Blit the transparent surface onto the main screen
+        blit_pos = (center_screen[0] - screen_radius - 5, center_screen[1] - screen_radius - 5)
+        self.screen.blit(zone_surface, blit_pos)
+
+        # Draw bright outer ring with thicker line
+        pygame.draw.circle(self.screen, bright_cyan, center_screen, int(screen_radius), 3)
+
+        # Draw inner rings
+        pygame.draw.circle(self.screen, bright_cyan, center_screen, int(screen_radius * 0.7), 2)
+        pygame.draw.circle(self.screen, bright_yellow, center_screen, int(screen_radius * 0.4), 2)
+
+        # Cross lines through center with thicker lines
         cx, cy = center_screen
         r = int(screen_radius)
-        pygame.draw.line(self.screen, line_color, (cx - r, cy), (cx + r, cy), 1)
-        pygame.draw.line(self.screen, line_color, (cx, cy - r), (cx, cy + r), 1)
+        pygame.draw.line(self.screen, bright_cyan, (cx - r, cy), (cx + r, cy), 2)
+        pygame.draw.line(self.screen, bright_cyan, (cx, cy - r), (cx, cy + r), 2)
+
+        # Add corner markers for extra visibility
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy - r), (cx - r + 10, cy - r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy - r), (cx - r, cy - r + 10), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy - r), (cx + r - 10, cy - r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy - r), (cx + r, cy - r + 10), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy + r), (cx - r + 10, cy + r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy + r), (cx - r, cy + r - 10), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy + r), (cx + r - 10, cy + r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy + r), (cx + r, cy + r - 10), 2)
 
     def _render_drone(self, state: DroneState, colors: tuple = None, alpha: int = 255):
         """Render the drone as a realistic quadcopter.

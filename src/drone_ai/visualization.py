@@ -582,83 +582,40 @@ class DroneRenderer:
         """Render the hover zone as a semi-transparent sphere (10% visible).
 
         The hover zone is the 0.5m radius area where the drone should stay.
-        Draws directly on screen for visibility (pygame alpha blending is tricky).
+        Draws directly on screen for visibility.
         """
-        n_segments = 24
+        # Get the center point on screen
+        center_screen = self._world_to_screen(target)
+        if center_screen is None:
+            return
 
-        # Use a visible color for the wireframe (light green, semi-transparent feel)
-        # Drawing directly on screen - no alpha surface needed for lines
+        # Get a point at the edge to calculate screen-space radius
+        edge_point = target + np.array([radius, 0, 0])
+        edge_screen = self._world_to_screen(edge_point)
+
+        if edge_screen is None:
+            # Fallback: just draw a fixed-size circle
+            screen_radius = 50
+        else:
+            # Calculate screen-space radius
+            screen_radius = abs(edge_screen[0] - center_screen[0])
+            screen_radius = max(20, min(screen_radius, 200))  # Clamp to reasonable size
+
+        # Draw the hover zone as concentric circles (wireframe sphere effect)
         line_color = self.HOVER_ZONE  # (100, 255, 100) - light green
 
-        # Draw the equator circle (main horizontal ring at target height)
-        equator_points = []
-        for i in range(n_segments + 1):
-            angle = 2 * np.pi * i / n_segments
-            point = target + np.array([
-                radius * np.cos(angle),
-                radius * np.sin(angle),
-                0
-            ])
-            screen_point = self._world_to_screen(point)
-            if screen_point:
-                equator_points.append(screen_point)
+        # Main circle (equator)
+        pygame.draw.circle(self.screen, line_color, center_screen, int(screen_radius), 2)
 
-        # Draw equator outline directly on screen (visible!)
-        if len(equator_points) >= 3:
-            pygame.draw.lines(self.screen, line_color, True, equator_points, 2)
+        # Smaller circles for top/bottom effect
+        pygame.draw.circle(self.screen, line_color, center_screen, int(screen_radius * 0.7), 1)
+        pygame.draw.circle(self.screen, line_color, center_screen, int(screen_radius * 0.4), 1)
 
-        # Draw top circle (smaller, at top of sphere)
-        top_points = []
-        top_radius = radius * 0.7  # Smaller circle at top
-        for i in range(n_segments + 1):
-            angle = 2 * np.pi * i / n_segments
-            point = target + np.array([
-                top_radius * np.cos(angle),
-                top_radius * np.sin(angle),
-                radius * 0.7
-            ])
-            screen_point = self._world_to_screen(point)
-            if screen_point:
-                top_points.append(screen_point)
-
-        if len(top_points) >= 3:
-            pygame.draw.lines(self.screen, line_color, True, top_points, 1)
-
-        # Draw bottom circle
-        bottom_points = []
-        for i in range(n_segments + 1):
-            angle = 2 * np.pi * i / n_segments
-            point = target + np.array([
-                top_radius * np.cos(angle),
-                top_radius * np.sin(angle),
-                -radius * 0.7
-            ])
-            screen_point = self._world_to_screen(point)
-            if screen_point:
-                bottom_points.append(screen_point)
-
-        if len(bottom_points) >= 3:
-            pygame.draw.lines(self.screen, line_color, True, bottom_points, 1)
-
-        # Draw vertical meridian lines for 3D effect
-        for i in range(0, n_segments, 4):  # Every 4th segment
-            angle = 2 * np.pi * i / n_segments
-
-            # Draw arc from top to bottom through equator
-            arc_points = []
-            for j in range(9):  # 9 points along the arc
-                arc_angle = -np.pi/2 + np.pi * j / 8  # From -90 to +90 degrees
-                point = target + np.array([
-                    radius * np.cos(arc_angle) * np.cos(angle),
-                    radius * np.cos(arc_angle) * np.sin(angle),
-                    radius * np.sin(arc_angle)
-                ])
-                screen_point = self._world_to_screen(point)
-                if screen_point:
-                    arc_points.append(screen_point)
-
-            if len(arc_points) >= 2:
-                pygame.draw.lines(self.screen, line_color, False, arc_points, 1)
+        # Cross lines through center for visibility
+        cx, cy = center_screen
+        r = int(screen_radius)
+        pygame.draw.line(self.screen, line_color, (cx - r, cy), (cx + r, cy), 1)
+        pygame.draw.line(self.screen, line_color, (cx, cy - r), (cx, cy + r), 1)
 
     def _render_drone(self, state: DroneState, colors: tuple = None, alpha: int = 255):
         """Render the drone as a realistic quadcopter.

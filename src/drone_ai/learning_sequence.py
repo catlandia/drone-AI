@@ -275,14 +275,25 @@ class LearningSequence:
                     target = envs[0].target_position
                     additional_states = [envs[i].sim.state for i in range(1, self.population_size)]
 
+                    # Get package for delivery visualization
+                    package = envs[0].sim.package if hasattr(envs[0].sim, 'package') else None
+
+                    # Calculate mean reward across all drones
+                    mean_reward = sum(drone_rewards) / max(1, len(drone_rewards))
+
                     self.renderer.render(
                         state=state,
                         target=target,
                         trajectory=envs[0].position_history,
+                        package=package,
+                        dropzone_radius=0.3,
                         training_metrics={
                             'stage': stage_name,
                             'age': age + 1,
-                            'alive': alive_count
+                            'alive': alive_count,
+                            'episodes': age + 1,
+                            'episode_reward': drone_rewards[0],
+                            'mean_reward': mean_reward
                         },
                         additional_states=additional_states
                     )

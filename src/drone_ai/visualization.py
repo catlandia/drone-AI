@@ -107,6 +107,9 @@ class DroneRenderer:
     METRIC_GOOD = (50, 255, 50)    # Green
     METRIC_BAD = (255, 50, 50)     # Red
     METRIC_NEUTRAL = (255, 255, 50)  # Yellow
+    # Hover zone (10% visible - very transparent)
+    HOVER_ZONE = (100, 255, 100)   # Light green bubble
+    HOVER_ZONE_ALPHA = 25          # 10% opacity (255 * 0.10 ≈ 25)
 
     def __init__(
         self,
@@ -278,6 +281,7 @@ class DroneRenderer:
             self._render_package(package, state)
 
         self._render_trajectory(trajectory)
+        self._render_hover_zone(target, radius=0.5)  # 10% visible hover zone bubble
         self._render_target(target)
 
         # Render all drones (first drone opaque, others semi-transparent)
@@ -573,6 +577,67 @@ class DroneRenderer:
             pygame.draw.line(self.screen, self.TARGET,
                            (screen_pos[0], screen_pos[1] - 15),
                            (screen_pos[0], screen_pos[1] + 15), 2)
+
+    def _render_hover_zone(self, target: np.ndarray, radius: float = 0.5):
+        """Render the hover zone as a visible sphere outline.
+
+        The hover zone is the 0.5m radius area where the drone should stay.
+        Uses bright cyan color for maximum visibility.
+        """
+        # Get the center point on screen
+        center_screen = self._world_to_screen(target)
+        if center_screen is None:
+            return
+
+        # Get a point at the edge to calculate screen-space radius
+        edge_point = target + np.array([radius, 0, 0])
+        edge_screen = self._world_to_screen(edge_point)
+
+        if edge_screen is None:
+            # Fallback: just draw a fixed-size circle
+            screen_radius = 50
+        else:
+            # Calculate screen-space radius
+            screen_radius = abs(edge_screen[0] - center_screen[0])
+            screen_radius = max(30, min(screen_radius, 250))  # Clamp to reasonable size
+
+        # Use bright cyan for maximum visibility against dark background
+        bright_cyan = (0, 255, 255)
+        bright_yellow = (255, 255, 0)
+
+        # Create a temporary surface for semi-transparent fill
+        zone_surface = pygame.Surface((int(screen_radius * 2 + 10), int(screen_radius * 2 + 10)), pygame.SRCALPHA)
+        zone_center = (int(screen_radius + 5), int(screen_radius + 5))
+
+        # Draw semi-transparent filled circle (10% opacity)
+        pygame.draw.circle(zone_surface, (0, 255, 255, 25), zone_center, int(screen_radius))
+
+        # Blit the transparent surface onto the main screen
+        blit_pos = (center_screen[0] - screen_radius - 5, center_screen[1] - screen_radius - 5)
+        self.screen.blit(zone_surface, blit_pos)
+
+        # Draw bright outer ring with thicker line
+        pygame.draw.circle(self.screen, bright_cyan, center_screen, int(screen_radius), 3)
+
+        # Draw inner rings
+        pygame.draw.circle(self.screen, bright_cyan, center_screen, int(screen_radius * 0.7), 2)
+        pygame.draw.circle(self.screen, bright_yellow, center_screen, int(screen_radius * 0.4), 2)
+
+        # Cross lines through center with thicker lines
+        cx, cy = center_screen
+        r = int(screen_radius)
+        pygame.draw.line(self.screen, bright_cyan, (cx - r, cy), (cx + r, cy), 2)
+        pygame.draw.line(self.screen, bright_cyan, (cx, cy - r), (cx, cy + r), 2)
+
+        # Add corner markers for extra visibility
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy - r), (cx - r + 10, cy - r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy - r), (cx - r, cy - r + 10), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy - r), (cx + r - 10, cy - r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy - r), (cx + r, cy - r + 10), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy + r), (cx - r + 10, cy + r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx - r, cy + r), (cx - r, cy + r - 10), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy + r), (cx + r - 10, cy + r), 2)
+        pygame.draw.line(self.screen, bright_yellow, (cx + r, cy + r), (cx + r, cy + r - 10), 2)
 
     def _render_drone(self, state: DroneState, colors: tuple = None, alpha: int = 255):
         """Render the drone as a realistic quadcopter.

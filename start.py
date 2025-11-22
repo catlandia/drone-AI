@@ -86,10 +86,11 @@ def print_menu():
     print("  [1] Train - Hover (basic stabilization)")
     print("  [2] Train - Delivery (pickup and drop)")
     print("  [3] Train - Delivery Route (1km with obstacles)")
+    print("  [4] Train - Deployment Ready (REAL-WORLD simulation!)")
     print()
-    print("  [4] Watch Demo (no training)")
-    print("  [5] Evaluate a trained model")
-    print("  [6] Custom training (advanced)")
+    print("  [5] Watch Demo (no training)")
+    print("  [6] Evaluate a trained model")
+    print("  [7] Custom training (advanced)")
     print()
     print("  [0] Exit")
     print()
@@ -251,6 +252,56 @@ def train_delivery_route():
     run_command(cmd)
 
 
+def train_deployment_ready():
+    """Final training mode - maximum real-world simulation."""
+    clear_screen()
+    print_header()
+    print("TRAINING: Deployment Ready (Real-World Simulation)")
+    print("=" * 55)
+    print()
+    print("The ULTIMATE test before real-world deployment!")
+    print()
+    print("Simulates ALL real-world challenges:")
+    print("  - Wind: Variable speed, direction, gusts, turbulence")
+    print("  - Sensor noise: GPS drift, IMU noise, motor variance")
+    print("  - Battery: Voltage sag under load")
+    print("  - Physics: Mass variation, drag changes")
+    print("  - Obstacles: Random placement, varying sizes")
+    print()
+    print("If your drone survives THIS, it's ready for the real world!")
+    print()
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
+
+    print("\nSelect mission type:")
+    print("  [1] Hover Challenge - Maintain position despite disturbances")
+    print("  [2] Delivery Mission - Pickup and drop with all challenges")
+    print("  [3] Full Route - 1km delivery with everything enabled")
+    mission = input("Mission (default 3): ").strip()
+    if mission == "1":
+        task = "hover"
+    elif mission == "2":
+        task = "delivery"
+    else:
+        task = "delivery_route"
+
+    population, ages, steps_per_age = get_hybrid_params()
+
+    # Deployment ready uses maximum difficulty and domain randomization
+    cmd = [
+        sys.executable, "-m", "drone_ai.hybrid_train",
+        "--task", task,
+        "--population-size", population,
+        "--num-ages", ages,
+        "--steps-per-age", steps_per_age,
+        "--difficulty", "1.0",  # Maximum difficulty
+        "--domain-randomization",  # Enable all real-world effects
+        "--render",
+        "--render-freq", "5"
+    ]
+
+    run_command(cmd)
+
+
 def watch_demo():
     """Run visualization demo."""
     clear_screen()
@@ -402,10 +453,12 @@ def main():
         elif choice == "3":
             train_delivery_route()
         elif choice == "4":
-            watch_demo()
+            train_deployment_ready()
         elif choice == "5":
-            evaluate_model()
+            watch_demo()
         elif choice == "6":
+            evaluate_model()
+        elif choice == "7":
             custom_training()
         elif choice == "0":
             print("\nGoodbye!")

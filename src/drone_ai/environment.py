@@ -173,18 +173,27 @@ class DroneEnv(gym.Env):
         self.position_history: List[np.ndarray] = []
 
         # Reward weights (tunable)
-        # Main learning priorities: ACCURACY, CAREFULNESS, SPEED
+        # REBALANCED: Rewards should be mostly positive to encourage learning
+        # Total reward per step should be around +0.5 to +2.0 for good behavior
         self.reward_weights = {
-            # === CAREFULNESS (smooth, stable flight) ===
-            'position': 0.5,              # Track target position
-            'velocity': 0.3,              # Penalize fast/jerky movement
-            'orientation': 0.5,           # Keep level (careful flight)
-            'angular_velocity': 0.2,      # Smooth rotations
-            'action_smoothness': 0.3,     # Smooth control inputs
-            'alive': 0.05,                # Small survival bonus
-            'crash': -50.0,               # Heavy crash penalty (be careful!)
-            'upside_down': -15.0,         # Heavy penalty for being upside down (no longer fatal, just punished)
-            'success': 2.0,
+            # === CORE REWARDS (positive shaping) ===
+            'alive': 0.5,                 # Guaranteed positive per step (survival is good!)
+            'in_zone': 1.0,               # Bonus for being within hover zone (0.5m)
+            'centered': 0.5,              # Extra bonus for being well-centered in zone
+            'stable': 0.3,                # Bonus for low velocity (stable hover)
+            'level': 0.2,                 # Bonus for level orientation
+
+            # === PENALTIES (smaller, linear, capped) ===
+            'position_outside': 0.3,      # Penalty per meter outside zone (linear, not squared)
+            'velocity': 0.1,              # Small velocity penalty (capped)
+            'orientation': 0.1,           # Small tilt penalty (capped)
+            'angular_velocity': 0.05,     # Small rotation penalty (capped)
+            'action_smoothness': 0.1,     # Small jerk penalty (capped)
+
+            # === TERMINAL PENALTIES ===
+            'crash': -10.0,               # Crash penalty (reduced from -50)
+            'upside_down': -2.0,          # Upside down penalty (reduced from -15)
+            'success': 1.0,               # Extra bonus for perfect hover
 
             # === DELIVERY TASK REWARDS ===
             # Accuracy rewards (most important for delivery)
@@ -453,82 +462,102 @@ class DroneEnv(gym.Env):
         return observation
 
     def _compute_reward(self, action: np.ndarray) -> float:
-        """Compute reward for current state and action."""
+        """Compute reward for current state and action.
+
+        REBALANCED reward system:
+        - Mostly positive rewards for good behavior
+        - Small, capped penalties for mistakes
+        - Linear penalties (not squared) for better gradients
+        - Target: +0.5 to +2.0 per step for good behavior
+        """
         state = self.sim.state
         weights = self.reward_weights
+        reward = 0.0
 
-        # Position error with "hover zone" - no penalty if within acceptable range
+        # === GUARANTEED POSITIVE: Alive bonus ===
+        reward += weights['alive']  # +0.5 just for being alive
+
+        # === POSITION REWARD (hover zone) ===
         pos_error = np.linalg.norm(state.position - self.target_position)
-        hover_zone_radius = 0.5  # Acceptable range in meters
+        hover_zone_radius = 0.5  # Must stay within 0.5m radius
 
         if pos_error <= hover_zone_radius:
-            # Inside hover zone - no position penalty, give bonus instead
-            pos_reward = weights['position'] * 0.5  # Positive reward for being in zone
+            # Inside hover zone - BIG positive reward!
+            reward += weights['in_zone']  # +1.0 for being in zone
+
+            # Extra reward for being centered (closer to center = more reward)
+            # Scales from 0.5 (at edge) to 0.5 (at center)
+            centered_ratio = 1.0 - (pos_error / hover_zone_radius)
+            reward += weights['centered'] * centered_ratio  # Up to +0.5 for center
         else:
-            # Outside hover zone - penalize based on distance beyond zone
-            excess_error = pos_error - hover_zone_radius
-            pos_reward = -weights['position'] * excess_error ** 2
+            # Outside zone - LINEAR penalty (not squared!)
+            # Capped at 3m outside to prevent explosion
+            excess_error = min(pos_error - hover_zone_radius, 3.0)
+            reward -= weights['position_outside'] * excess_error  # Max -0.9
 
-        # Velocity penalty (prefer low velocities for hover)
-        vel_penalty = -weights['velocity'] * np.linalg.norm(state.velocity) ** 2
-
-        # Orientation reward (prefer level flight)
+        # === STABILITY REWARDS ===
+        velocity = np.linalg.norm(state.velocity)
         euler = state.get_euler_angles()
-        orient_penalty = -weights['orientation'] * (euler[0]**2 + euler[1]**2)
+        tilt = abs(euler[0]) + abs(euler[1])  # Roll + pitch
 
-        # Angular velocity penalty
-        ang_vel_penalty = -weights['angular_velocity'] * np.linalg.norm(state.angular_velocity) ** 2
+        # Reward for low velocity (stable)
+        if velocity < 0.5:
+            reward += weights['stable']  # +0.3 for very stable
+        elif velocity < 1.0:
+            reward += weights['stable'] * 0.5  # +0.15 for somewhat stable
 
-        # Action smoothness (penalize jerky control)
-        # Actions are always 5 dims now, use first 4 for motor smoothness
+        # Reward for level orientation
+        if tilt < 0.2:  # ~11 degrees
+            reward += weights['level']  # +0.2 for level flight
+        elif tilt < 0.4:  # ~23 degrees
+            reward += weights['level'] * 0.5  # +0.1 for somewhat level
+
+        # === SMALL PENALTIES (linear, capped) ===
+        # Velocity penalty (only if moving fast)
+        if velocity > 1.0:
+            vel_penalty = min(velocity - 1.0, 2.0) * weights['velocity']
+            reward -= vel_penalty  # Max -0.2
+
+        # Orientation penalty (only if tilted significantly)
+        if tilt > 0.3:  # ~17 degrees
+            tilt_penalty = min(tilt - 0.3, 1.0) * weights['orientation']
+            reward -= tilt_penalty  # Max -0.1
+
+        # Angular velocity penalty (only if spinning fast)
+        ang_vel = np.linalg.norm(state.angular_velocity)
+        if ang_vel > 1.0:
+            ang_penalty = min(ang_vel - 1.0, 2.0) * weights['angular_velocity']
+            reward -= ang_penalty  # Max -0.1
+
+        # Action smoothness (only penalize large changes)
         motor_action = action[:4]
         prev_motor = self.prev_action[:4]
         action_diff = np.linalg.norm(motor_action - prev_motor)
-        smoothness_penalty = -weights['action_smoothness'] * action_diff ** 2
+        if action_diff > 0.2:
+            smooth_penalty = min(action_diff - 0.2, 0.5) * weights['action_smoothness']
+            reward -= smooth_penalty  # Max -0.05
 
-        # Alive bonus
-        alive_bonus = weights['alive']
+        # === SUCCESS BONUS ===
+        # Perfect hover: in zone, stable, and level
+        if pos_error < hover_zone_radius * 0.5 and velocity < 0.3 and tilt < 0.1:
+            reward += weights['success']  # +1.0 for perfect hover
 
-        # Success bonus (within hover zone and stable)
-        success_bonus = 0.0
-        if pos_error < hover_zone_radius and np.linalg.norm(state.velocity) < 1.0:
-            success_bonus = weights['success'] * 0.2  # Bonus for stable hover in zone
-
-        # Crash penalty
-        crash_penalty = 0.0
+        # === TERMINAL PENALTIES ===
         if self.sim.is_crashed():
-            crash_penalty = weights['crash']
+            reward += weights['crash']  # -10.0 for crash
 
         # Upside-down penalty (severe tilt > 60 degrees)
-        # This only kicks in when drone is nearly flipped, not for normal maneuvering
-        upside_down_penalty = 0.0
         tilt_threshold = np.pi / 3  # 60 degrees
         if abs(euler[0]) > tilt_threshold or abs(euler[1]) > tilt_threshold:
-            # Stronger penalty the more upside down it is
-            tilt_severity = max(abs(euler[0]), abs(euler[1])) - tilt_threshold
-            upside_down_penalty = weights['upside_down'] * (1 + tilt_severity)
+            reward += weights['upside_down']  # -2.0 for being upside down
 
-        # Delivery-specific rewards
-        delivery_reward = 0.0
+        # === DELIVERY-SPECIFIC REWARDS ===
         if self.task == TaskType.DELIVERY:
-            delivery_reward = self._compute_delivery_reward(action)
+            reward += self._compute_delivery_reward(action)
         elif self.task == TaskType.DELIVERY_ROUTE:
-            delivery_reward = self._compute_route_reward(action)
+            reward += self._compute_route_reward(action)
 
-        total_reward = (
-            pos_reward +
-            vel_penalty +
-            orient_penalty +
-            ang_vel_penalty +
-            smoothness_penalty +
-            alive_bonus +
-            success_bonus +
-            crash_penalty +
-            upside_down_penalty +
-            delivery_reward
-        )
-
-        return float(total_reward)
+        return float(reward)
 
     def _compute_delivery_reward(self, action: np.ndarray) -> float:
         """Compute delivery-specific rewards.

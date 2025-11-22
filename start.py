@@ -33,13 +33,13 @@ def print_menu():
     print("  [2] Train - Delivery (pickup and drop)")
     print("  [3] Train - Delivery Route (1km with obstacles)")
     print()
-    print("  [4] Watch Demo (visualization only)")
+    print("  [4] Watch Demo (no training)")
     print("  [5] Evaluate a trained model")
-    print()
-    print("  [6] Train with LIVE visualization")
-    print("  [7] Custom training (advanced)")
+    print("  [6] Custom training (advanced)")
     print()
     print("  [0] Exit")
+    print()
+    print("All training includes LIVE visualization so you can watch the drone learn!")
     print()
 
 
@@ -59,11 +59,14 @@ def run_command(cmd):
 
 
 def train_hover():
-    """Start hover training."""
+    """Start hover training with live visualization."""
     clear_screen()
     print_header()
     print("TRAINING: Hover Task")
     print("The drone will learn to stabilize and hover in place.")
+    print("You will see the training live in a visualization window.")
+    print()
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
     print()
 
     steps = input("Training steps (default 100000): ").strip()
@@ -76,18 +79,23 @@ def train_hover():
         sys.executable, "-m", "drone_ai.train",
         "--task", "hover",
         "--total-timesteps", steps,
-        "--difficulty", difficulty
+        "--difficulty", difficulty,
+        "--render",
+        "--render-freq", "5"
     ]
 
     run_command(cmd)
 
 
 def train_delivery():
-    """Start delivery training."""
+    """Start delivery training with live visualization."""
     clear_screen()
     print_header()
     print("TRAINING: Delivery Task")
     print("The drone will learn to pick up packages and drop them accurately.")
+    print("You will see the training live in a visualization window.")
+    print()
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
     print()
 
     steps = input("Training steps (default 500000): ").strip()
@@ -100,14 +108,16 @@ def train_delivery():
         sys.executable, "-m", "drone_ai.train",
         "--task", "delivery",
         "--total-timesteps", steps,
-        "--difficulty", difficulty
+        "--difficulty", difficulty,
+        "--render",
+        "--render-freq", "5"
     ]
 
     run_command(cmd)
 
 
 def train_delivery_route():
-    """Start long-range delivery route training."""
+    """Start long-range delivery route training with live visualization."""
     clear_screen()
     print_header()
     print("TRAINING: Delivery Route (Long-Range)")
@@ -117,6 +127,9 @@ def train_delivery_route():
     print("  - Avoid obstacles (trees, buildings)")
     print("  - Drop packages within 5m accuracy")
     print("  - Return to base and reload")
+    print()
+    print("You will see the training live in a visualization window.")
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
     print()
 
     steps = input("Training steps (default 1000000): ").strip()
@@ -131,7 +144,9 @@ def train_delivery_route():
         sys.executable, "-m", "drone_ai.train",
         "--task", "delivery_route",
         "--total-timesteps", steps,
-        "--difficulty", difficulty
+        "--difficulty", difficulty,
+        "--render",
+        "--render-freq", "5"
     ]
 
     if randomization == 'y':
@@ -207,47 +222,6 @@ def evaluate_model():
     run_command(cmd)
 
 
-def train_with_visualization():
-    """Start training with live visualization."""
-    clear_screen()
-    print_header()
-    print("TRAINING WITH LIVE VISUALIZATION")
-    print("Watch the drone learn in real-time!")
-    print()
-    print("Note: This is slower than training without visualization.")
-    print()
-
-    print("Choose task:")
-    print("  1. Hover")
-    print("  2. Delivery")
-    print("  3. Delivery Route")
-    task_choice = input("Task (1-3, default 3): ").strip()
-
-    if task_choice == "1":
-        task = "hover"
-    elif task_choice == "2":
-        task = "delivery"
-    else:
-        task = "delivery_route"
-
-    steps = input("Training steps (default 100000): ").strip()
-    steps = steps if steps else "100000"
-
-    render_freq = input("Render frequency (1=every step, 10=faster, default 5): ").strip()
-    render_freq = render_freq if render_freq else "5"
-
-    cmd = [
-        sys.executable, "-m", "drone_ai.train",
-        "--task", task,
-        "--total-timesteps", steps,
-        "--render",
-        "--render-freq", render_freq,
-        "--difficulty", "0.5"
-    ]
-
-    run_command(cmd)
-
-
 def custom_training():
     """Advanced custom training options."""
     clear_screen()
@@ -295,8 +269,6 @@ def main():
         elif choice == "5":
             evaluate_model()
         elif choice == "6":
-            train_with_visualization()
-        elif choice == "7":
             custom_training()
         elif choice == "0":
             print("\nGoodbye!")

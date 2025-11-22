@@ -774,7 +774,7 @@ class DroneEnv(gym.Env):
             if self.difficulty > 0.5:
                 self.target_position = self._random_target()
             else:
-                self.target_position = np.array([0.0, 0.0, 1.0])
+                self.target_position = np.array([0.0, 0.0, 2.0])  # 2m hover height
 
         elif self.task == TaskType.WAYPOINT:
             # Generate waypoints
@@ -1016,7 +1016,7 @@ class DroneEnv(gym.Env):
             base = self.base_position.copy()
             base[2] = 0.1  # Start on ground at base
         else:
-            base = np.array([0.0, 0.0, 1.0])  # Hover task starts in air
+            base = np.array([0.0, 0.0, 2.0])  # Hover task starts at 2m height
 
         if self.difficulty > 0.3:
             noise = self.np_random.uniform(-0.3, 0.3, 3) * self.difficulty

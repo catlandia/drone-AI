@@ -321,14 +321,25 @@ class HybridTrainer:
             drone_episode_rewards = [0.0] * self.population_size
             drone_episodes_completed = [0] * self.population_size
 
+            # Track which drones are alive (dead drones don't respawn until ALL are dead)
+            drone_alive = [True] * self.population_size
+            drone_survival_steps = [0] * self.population_size  # How long each drone survived
+
             # Track steps for PPO updates
             steps_since_update = [0] * self.population_size
 
             pbar = tqdm(total=self.args.steps_per_age, desc=f"Age {age+1} (PPO learning)")
 
             for step in range(self.args.steps_per_age):
+                # Count alive drones
+                alive_count = sum(drone_alive)
+
                 # Step each drone and collect experience
                 for i in range(self.population_size):
+                    # Skip dead drones
+                    if not drone_alive[i]:
+                        continue
+
                     agent = self.population[i]
                     env = self.envs[i]
                     obs = observations[i]
@@ -350,12 +361,13 @@ class HybridTrainer:
 
                     drone_total_rewards[i] += reward
                     drone_episode_rewards[i] += reward
+                    drone_survival_steps[i] += 1
                     steps_since_update[i] += 1
 
                     if done:
+                        # Drone crashed - mark as dead (no respawn until all dead)
+                        drone_alive[i] = False
                         drone_episodes_completed[i] += 1
-                        drone_episode_rewards[i] = 0.0
-                        observations[i], _ = env.reset()
                     else:
                         observations[i] = next_obs
 
@@ -364,7 +376,15 @@ class HybridTrainer:
                         agent.update(observations[i])
                         steps_since_update[i] = 0
 
-                total_steps += self.population_size
+                # Check if ALL drones are dead - if so, reset all of them
+                if not any(drone_alive):
+                    # Reset all environments
+                    for i, env in enumerate(self.envs):
+                        observations[i], _ = env.reset(seed=self.args.seed + i + age * 1000 + step)
+                        drone_alive[i] = True
+                        drone_episode_rewards[i] = 0.0
+
+                total_steps += alive_count  # Only count steps for alive drones
                 pbar.update(1)
 
                 # Render visualization
@@ -375,6 +395,7 @@ class HybridTrainer:
                         'mean_reward': np.mean(drone_total_rewards),
                         'total_steps': total_steps,
                         'age': age + 1,
+                        'alive': sum(drone_alive),
                     }
                     if not self._render_frame(training_metrics):
                         print("\nVisualization closed.")
@@ -384,16 +405,24 @@ class HybridTrainer:
 
             pbar.close()
 
-            # Calculate fitness
-            fitnesses = drone_total_rewards
+            # Calculate fitness (combine reward and survival time)
+            # Fitness = total_reward + survival_bonus
+            fitnesses = []
+            for i in range(self.population_size):
+                # Reward survival: longer survival = higher fitness bonus
+                survival_bonus = drone_survival_steps[i] * 0.01  # Small bonus per step survived
+                fitness = drone_total_rewards[i] + survival_bonus
+                fitnesses.append(fitness)
+
             best_idx = np.argmax(fitnesses)
             best_fitness = fitnesses[best_idx]
             mean_fitness = np.mean(fitnesses)
             worst_fitness = np.min(fitnesses)
+            best_survival = drone_survival_steps[best_idx]
 
-            print(f"  Best drone: #{best_idx + 1} with fitness {best_fitness:.1f}")
+            print(f"  Best drone: #{best_idx + 1} (fitness: {best_fitness:.1f}, survived: {best_survival} steps)")
             print(f"  Mean fitness: {mean_fitness:.1f}, Worst: {worst_fitness:.1f}")
-            print(f"  Episodes completed: {sum(drone_episodes_completed)}")
+            print(f"  Episodes (full resets): {sum(drone_episodes_completed)}")
 
             # Track best ever
             if best_fitness > self.best_fitness_ever:

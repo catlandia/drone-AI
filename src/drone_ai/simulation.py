@@ -286,6 +286,10 @@ class DroneSimulation:
         hover_rpm = np.sqrt(hover_force_per_motor / self.config.motor_constant)
         self.state.motor_speeds = np.full(4, hover_rpm)
 
+        # Reset obstacle collision flag and wind
+        self._obstacle_collision = False
+        self._current_wind = np.zeros(3)
+
         # Set up package for delivery mission
         if package_pickup is not None:
             self.package = PackageState(

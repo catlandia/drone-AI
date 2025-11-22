@@ -174,12 +174,24 @@ class LearningSequence:
             shared_pickup = envs[0].pickup_position.copy()
             shared_dropzone = envs[0].dropzone_position.copy()
             shared_target = envs[0].target_position.copy()
+            shared_base = envs[0].base_position.copy() if hasattr(envs[0], 'base_position') else None
 
             for i in range(1, self.population_size):
+                # Reset first, then override positions
+                obs, _ = envs[i].reset(seed=base_seed)
+
+                # Override with shared positions AFTER reset
                 envs[i].pickup_position = shared_pickup.copy()
                 envs[i].dropzone_position = shared_dropzone.copy()
                 envs[i].target_position = shared_target.copy()
-                obs, _ = envs[i].reset(seed=base_seed)
+                if shared_base is not None:
+                    envs[i].base_position = shared_base.copy()
+
+                # Also update simulation's package positions
+                if envs[i].sim.package is not None:
+                    envs[i].sim.package.pickup_position = shared_pickup.copy()
+                    envs[i].sim.package.dropzone_position = shared_dropzone.copy()
+
                 observations.append(obs)
 
             drone_alive = [True] * self.population_size
@@ -230,13 +242,25 @@ class LearningSequence:
                     shared_pickup = envs[0].pickup_position.copy()
                     shared_dropzone = envs[0].dropzone_position.copy()
                     shared_target = envs[0].target_position.copy()
+                    shared_base = envs[0].base_position.copy() if hasattr(envs[0], 'base_position') else None
                     drone_alive[0] = True
 
                     for i in range(1, self.population_size):
+                        # Reset first, then override positions
+                        observations[i], _ = envs[i].reset(seed=reset_seed)
+
+                        # Override with shared positions AFTER reset
                         envs[i].pickup_position = shared_pickup.copy()
                         envs[i].dropzone_position = shared_dropzone.copy()
                         envs[i].target_position = shared_target.copy()
-                        observations[i], _ = envs[i].reset(seed=reset_seed)
+                        if shared_base is not None:
+                            envs[i].base_position = shared_base.copy()
+
+                        # Also update simulation's package positions
+                        if envs[i].sim.package is not None:
+                            envs[i].sim.package.pickup_position = shared_pickup.copy()
+                            envs[i].sim.package.dropzone_position = shared_dropzone.copy()
+
                         drone_alive[i] = True
 
                 pbar.update(1)

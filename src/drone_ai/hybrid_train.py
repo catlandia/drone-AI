@@ -326,14 +326,25 @@ class HybridTrainer:
             shared_pickup = self.envs[0].pickup_position.copy()
             shared_dropzone = self.envs[0].dropzone_position.copy()
             shared_target = self.envs[0].target_position.copy()
+            shared_base = self.envs[0].base_position.copy() if hasattr(self.envs[0], 'base_position') else None
 
             for i in range(1, self.population_size):
                 env = self.envs[i]
-                # Set same positions before reset
+                # Reset first, then override positions
+                obs, _ = env.reset(seed=base_seed)
+
+                # Override with shared positions AFTER reset
                 env.pickup_position = shared_pickup.copy()
                 env.dropzone_position = shared_dropzone.copy()
                 env.target_position = shared_target.copy()
-                obs, _ = env.reset(seed=base_seed)  # Same seed = same positions
+                if shared_base is not None:
+                    env.base_position = shared_base.copy()
+
+                # Also update simulation's package positions if delivery task
+                if env.sim.package is not None:
+                    env.sim.package.pickup_position = shared_pickup.copy()
+                    env.sim.package.dropzone_position = shared_dropzone.copy()
+
                 observations.append(obs)
 
             # Track rewards per drone
@@ -405,15 +416,27 @@ class HybridTrainer:
                     shared_pickup = self.envs[0].pickup_position.copy()
                     shared_dropzone = self.envs[0].dropzone_position.copy()
                     shared_target = self.envs[0].target_position.copy()
+                    shared_base = self.envs[0].base_position.copy() if hasattr(self.envs[0], 'base_position') else None
                     drone_alive[0] = True
                     drone_episode_rewards[0] = 0.0
 
                     for i in range(1, self.population_size):
                         env = self.envs[i]
+                        # Reset first, then override positions
+                        observations[i], _ = env.reset(seed=reset_seed)
+
+                        # Override with shared positions AFTER reset
                         env.pickup_position = shared_pickup.copy()
                         env.dropzone_position = shared_dropzone.copy()
                         env.target_position = shared_target.copy()
-                        observations[i], _ = env.reset(seed=reset_seed)
+                        if shared_base is not None:
+                            env.base_position = shared_base.copy()
+
+                        # Also update simulation's package positions
+                        if env.sim.package is not None:
+                            env.sim.package.pickup_position = shared_pickup.copy()
+                            env.sim.package.dropzone_position = shared_dropzone.copy()
+
                         drone_alive[i] = True
                         drone_episode_rewards[i] = 0.0
 

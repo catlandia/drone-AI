@@ -26,6 +26,14 @@ except ImportError:
 from drone_ai.simulation import DroneState, PackageState, PackageStatus, Obstacle
 
 
+class CameraMode:
+    """Available camera modes."""
+    FOLLOW = "follow"           # Follow drone from behind
+    FREE = "free"               # Free roaming camera
+    FINISH = "finish"           # View from finish/dropzone
+    FPV = "fpv"                 # First-person view from drone
+
+
 @dataclass
 class CameraState:
     """Camera configuration for 3D view."""
@@ -33,10 +41,21 @@ class CameraState:
     azimuth: float = 45.0  # Horizontal angle (degrees)
     elevation: float = 30.0  # Vertical angle (degrees)
     target: np.ndarray = None  # Look-at target
+    mode: str = CameraMode.FOLLOW  # Current camera mode
+
+    # For free roam mode
+    free_position: np.ndarray = None  # Manual camera position
+
+    # For finish point mode
+    finish_position: np.ndarray = None  # Dropzone/finish location
 
     def __post_init__(self):
         if self.target is None:
             self.target = np.array([0.0, 0.0, 1.0])
+        if self.free_position is None:
+            self.free_position = np.array([5.0, 5.0, 5.0])
+        if self.finish_position is None:
+            self.finish_position = np.array([0.0, 0.0, 0.0])
 
 
 class DroneRenderer:
@@ -44,10 +63,17 @@ class DroneRenderer:
     Real-time 3D drone visualization.
 
     Controls:
-        - Arrow keys: Rotate camera
+        - Arrow keys: Rotate camera (or move in free roam)
         - +/-: Zoom in/out
         - R: Reset camera
-        - Space: Toggle follow mode
+        - 1: Follow mode (camera follows drone)
+        - 2: Free roam mode (WASD + arrow keys to move)
+        - 3: Finish point view (camera at dropzone looking at drone)
+        - 4: FPV mode (first-person view from drone)
+        - WASD: Move camera in free roam mode
+        - Q/E: Move up/down in free roam mode
+        - T: Toggle trajectory
+        - H: Toggle HUD
         - ESC: Close window
     """
 
@@ -108,12 +134,23 @@ class DroneRenderer:
 
         # Camera state
         self.camera = CameraState()
-        self.follow_mode = True
+
+        # Store drone state for FPV mode
+        self._drone_state = None
+        self._dropzone_position = None
 
         # Rendering settings
         self.show_trajectory = True
         self.show_hud = True
         self.max_trajectory_points = 500
+
+        # Camera mode names for display
+        self.camera_mode_names = {
+            CameraMode.FOLLOW: "Follow",
+            CameraMode.FREE: "Free Roam",
+            CameraMode.FINISH: "Finish View",
+            CameraMode.FPV: "FPV (Drone)"
+        }
 
     def render(
         self,
@@ -150,9 +187,17 @@ class DroneRenderer:
         # Handle continuous key presses
         self._handle_continuous_input()
 
-        # Update camera target if following
-        if self.follow_mode:
-            self.camera.target = state.position.copy()
+        # Store drone state for camera calculations
+        self._drone_state = state
+
+        # Update dropzone position if package exists
+        if package is not None:
+            self._dropzone_position = package.dropzone_position.copy()
+            self.camera.finish_position = package.dropzone_position.copy()
+            self.camera.finish_position[2] = 3.0  # View from 3m height
+
+        # Update camera based on mode
+        self._update_camera_for_mode(state)
 
         # Clear screen
         self.screen.fill(self.BACKGROUND)
@@ -198,15 +243,55 @@ class DroneRenderer:
         self.render(state, target, trajectory, package, dropzone_radius)
         return pygame.surfarray.array3d(self.screen).transpose(1, 0, 2)
 
+    def _update_camera_for_mode(self, state: DroneState):
+        """Update camera position/target based on current mode."""
+        if self.camera.mode == CameraMode.FOLLOW:
+            # Follow behind the drone
+            self.camera.target = state.position.copy()
+
+        elif self.camera.mode == CameraMode.FREE:
+            # Free roam - target is where camera is looking
+            # Camera position is manually controlled
+            pass
+
+        elif self.camera.mode == CameraMode.FINISH:
+            # Camera at finish/dropzone looking at drone
+            if self._dropzone_position is not None:
+                self.camera.target = state.position.copy()
+            else:
+                # No dropzone, default to origin
+                self.camera.target = state.position.copy()
+
+        elif self.camera.mode == CameraMode.FPV:
+            # First person view from drone
+            self.camera.target = state.position.copy()
+
     def _handle_input(self, event):
         """Handle single key press events."""
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 pygame.quit()
             elif event.key == pygame.K_r:
+                # Reset camera but keep mode
+                mode = self.camera.mode
                 self.camera = CameraState()
-            elif event.key == pygame.K_SPACE:
-                self.follow_mode = not self.follow_mode
+                self.camera.mode = mode
+            # Camera mode switching (1-4 keys)
+            elif event.key == pygame.K_1:
+                self.camera.mode = CameraMode.FOLLOW
+                print("Camera: Follow mode")
+            elif event.key == pygame.K_2:
+                self.camera.mode = CameraMode.FREE
+                # Initialize free camera at current view position
+                if self._drone_state is not None:
+                    self.camera.free_position = self._drone_state.position + np.array([5, 5, 3])
+                print("Camera: Free roam mode (WASD + QE to move)")
+            elif event.key == pygame.K_3:
+                self.camera.mode = CameraMode.FINISH
+                print("Camera: Finish point view")
+            elif event.key == pygame.K_4:
+                self.camera.mode = CameraMode.FPV
+                print("Camera: FPV (drone perspective)")
             elif event.key == pygame.K_t:
                 self.show_trajectory = not self.show_trajectory
             elif event.key == pygame.K_h:
@@ -216,43 +301,85 @@ class DroneRenderer:
         """Handle continuous key presses."""
         keys = pygame.key.get_pressed()
 
-        # Camera rotation
-        rotation_speed = 2.0
-        if keys[pygame.K_LEFT]:
-            self.camera.azimuth -= rotation_speed
-        if keys[pygame.K_RIGHT]:
-            self.camera.azimuth += rotation_speed
-        if keys[pygame.K_UP]:
-            self.camera.elevation = min(89, self.camera.elevation + rotation_speed)
-        if keys[pygame.K_DOWN]:
-            self.camera.elevation = max(-89, self.camera.elevation - rotation_speed)
+        if self.camera.mode == CameraMode.FREE:
+            # Free roam mode - WASD + QE movement
+            move_speed = 0.3
+            az = math.radians(self.camera.azimuth)
 
-        # Zoom
-        zoom_speed = 0.1
-        if keys[pygame.K_EQUALS] or keys[pygame.K_PLUS]:
-            self.camera.distance = max(1, self.camera.distance - zoom_speed)
-        if keys[pygame.K_MINUS]:
-            self.camera.distance = min(20, self.camera.distance + zoom_speed)
+            # Forward/backward (W/S)
+            if keys[pygame.K_w]:
+                self.camera.free_position[0] -= move_speed * math.sin(az)
+                self.camera.free_position[1] -= move_speed * math.cos(az)
+            if keys[pygame.K_s]:
+                self.camera.free_position[0] += move_speed * math.sin(az)
+                self.camera.free_position[1] += move_speed * math.cos(az)
+
+            # Strafe left/right (A/D)
+            if keys[pygame.K_a]:
+                self.camera.free_position[0] -= move_speed * math.cos(az)
+                self.camera.free_position[1] += move_speed * math.sin(az)
+            if keys[pygame.K_d]:
+                self.camera.free_position[0] += move_speed * math.cos(az)
+                self.camera.free_position[1] -= move_speed * math.sin(az)
+
+            # Up/down (Q/E)
+            if keys[pygame.K_q]:
+                self.camera.free_position[2] -= move_speed
+            if keys[pygame.K_e]:
+                self.camera.free_position[2] += move_speed
+
+            # Arrow keys rotate view in free mode
+            rotation_speed = 2.0
+            if keys[pygame.K_LEFT]:
+                self.camera.azimuth -= rotation_speed
+            if keys[pygame.K_RIGHT]:
+                self.camera.azimuth += rotation_speed
+            if keys[pygame.K_UP]:
+                self.camera.elevation = min(89, self.camera.elevation + rotation_speed)
+            if keys[pygame.K_DOWN]:
+                self.camera.elevation = max(-89, self.camera.elevation - rotation_speed)
+        else:
+            # Other modes - arrow keys rotate camera around target
+            rotation_speed = 2.0
+            if keys[pygame.K_LEFT]:
+                self.camera.azimuth -= rotation_speed
+            if keys[pygame.K_RIGHT]:
+                self.camera.azimuth += rotation_speed
+            if keys[pygame.K_UP]:
+                self.camera.elevation = min(89, self.camera.elevation + rotation_speed)
+            if keys[pygame.K_DOWN]:
+                self.camera.elevation = max(-89, self.camera.elevation - rotation_speed)
+
+        # Zoom (works in all modes except FPV)
+        if self.camera.mode != CameraMode.FPV:
+            zoom_speed = 0.1
+            if keys[pygame.K_EQUALS] or keys[pygame.K_PLUS]:
+                self.camera.distance = max(1, self.camera.distance - zoom_speed)
+            if keys[pygame.K_MINUS]:
+                self.camera.distance = min(100, self.camera.distance + zoom_speed)
 
     def _world_to_screen(self, point: np.ndarray) -> Tuple[int, int]:
         """Project 3D world point to 2D screen coordinates."""
-        # Camera position
-        az = math.radians(self.camera.azimuth)
-        el = math.radians(self.camera.elevation)
-
-        cam_x = self.camera.target[0] + self.camera.distance * math.cos(el) * math.sin(az)
-        cam_y = self.camera.target[1] + self.camera.distance * math.cos(el) * math.cos(az)
-        cam_z = self.camera.target[2] + self.camera.distance * math.sin(el)
-        cam_pos = np.array([cam_x, cam_y, cam_z])
+        # Calculate camera position based on mode
+        cam_pos, look_at = self._get_camera_position_and_target()
 
         # View direction
-        forward = self.camera.target - cam_pos
-        forward = forward / np.linalg.norm(forward)
+        forward = look_at - cam_pos
+        dist = np.linalg.norm(forward)
+        if dist < 0.001:
+            return None
+        forward = forward / dist
 
         # Right and up vectors
         world_up = np.array([0, 0, 1])
         right = np.cross(forward, world_up)
-        right = right / np.linalg.norm(right)
+        right_norm = np.linalg.norm(right)
+        if right_norm < 0.001:
+            # Looking straight up or down, use different up vector
+            world_up = np.array([0, 1, 0])
+            right = np.cross(forward, world_up)
+            right_norm = np.linalg.norm(right)
+        right = right / right_norm
         up = np.cross(right, forward)
 
         # Project point
@@ -265,13 +392,66 @@ class DroneRenderer:
             return None  # Behind camera
 
         # Perspective projection
-        fov = 60
+        fov = 60 if self.camera.mode != CameraMode.FPV else 90  # Wider FOV for FPV
         scale = self.height / (2 * math.tan(math.radians(fov / 2)))
 
         screen_x = int(self.width / 2 + x * scale / z)
         screen_y = int(self.height / 2 - y * scale / z)
 
         return (screen_x, screen_y)
+
+    def _get_camera_position_and_target(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get camera position and look-at target based on current mode."""
+        az = math.radians(self.camera.azimuth)
+        el = math.radians(self.camera.elevation)
+
+        if self.camera.mode == CameraMode.FOLLOW:
+            # Orbit camera around drone
+            cam_x = self.camera.target[0] + self.camera.distance * math.cos(el) * math.sin(az)
+            cam_y = self.camera.target[1] + self.camera.distance * math.cos(el) * math.cos(az)
+            cam_z = self.camera.target[2] + self.camera.distance * math.sin(el)
+            return np.array([cam_x, cam_y, cam_z]), self.camera.target.copy()
+
+        elif self.camera.mode == CameraMode.FREE:
+            # Free camera position, look in direction based on azimuth/elevation
+            cam_pos = self.camera.free_position.copy()
+            look_dir = np.array([
+                -math.sin(az) * math.cos(el),
+                -math.cos(az) * math.cos(el),
+                math.sin(el)
+            ])
+            look_at = cam_pos + look_dir * 10  # Look 10m ahead
+            return cam_pos, look_at
+
+        elif self.camera.mode == CameraMode.FINISH:
+            # Camera at finish point looking at drone
+            if self._dropzone_position is not None:
+                cam_pos = self.camera.finish_position.copy()
+                cam_pos[2] = max(3.0, cam_pos[2])  # At least 3m high
+            else:
+                cam_pos = np.array([10.0, 10.0, 5.0])
+            return cam_pos, self.camera.target.copy()
+
+        elif self.camera.mode == CameraMode.FPV:
+            # First person view from drone
+            if self._drone_state is not None:
+                drone_pos = self._drone_state.position.copy()
+                R = self._drone_state.get_rotation_matrix()
+                # Camera slightly in front and above drone center
+                cam_offset = R @ np.array([0.05, 0, 0.02])
+                cam_pos = drone_pos + cam_offset
+                # Look in drone's forward direction
+                forward = R @ np.array([1, 0, 0])
+                look_at = cam_pos + forward * 10
+                return cam_pos, look_at
+            else:
+                return np.array([0, 0, 1]), np.array([1, 0, 1])
+
+        # Default fallback
+        cam_x = self.camera.target[0] + self.camera.distance * math.cos(el) * math.sin(az)
+        cam_y = self.camera.target[1] + self.camera.distance * math.cos(el) * math.cos(az)
+        cam_z = self.camera.target[2] + self.camera.distance * math.sin(el)
+        return np.array([cam_x, cam_y, cam_z]), self.camera.target.copy()
 
     def _render_ground(self):
         """Render ground grid."""
@@ -658,8 +838,17 @@ class DroneRenderer:
                 text = self.font.render(sr_text, True, self.METRIC_GOOD if success > 50 else self.METRIC_BAD)
                 self.screen.blit(text, (20, y_offset))
 
+        # Camera mode indicator (top right)
+        mode_name = self.camera_mode_names.get(self.camera.mode, "Unknown")
+        mode_text = f"Camera: {mode_name}"
+        text = self.font.render(mode_text, True, (255, 200, 100))
+        self.screen.blit(text, (self.width - text.get_width() - 20, 15))
+
         # Controls help (bottom of screen)
-        help_text = "Arrow keys: rotate | +/-: zoom | Space: follow | T: trajectory | H: HUD"
+        if self.camera.mode == CameraMode.FREE:
+            help_text = "WASD: move | QE: up/down | Arrows: look | 1-4: camera mode | T: trajectory | H: HUD"
+        else:
+            help_text = "Arrows: rotate | +/-: zoom | 1-4: camera mode | T: trajectory | H: HUD"
         text = self.font.render(help_text, True, (100, 100, 100))
         self.screen.blit(text, (self.width // 2 - text.get_width() // 2, self.height - 25))
 

@@ -295,7 +295,16 @@ class Trainer:
                     self.env_episode_lengths[env_idx] += 1
                     self.total_steps += 1
 
-                    # Live visualization (only first environment)
+                    # Process window events frequently to prevent freezing
+                    if self.renderer is not None:
+                        if not self.renderer.process_events():
+                            # Window was closed
+                            print("\nVisualization window closed.")
+                            pbar.close()
+                            self.save_checkpoint('interrupted')
+                            return
+
+                    # Live visualization (only first environment, every render_freq steps)
                     if env_idx == 0 and self.renderer is not None and self.total_steps % self.args.render_freq == 0:
                         self._render_frame(self.env_episode_rewards[0])
 

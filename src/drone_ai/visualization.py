@@ -177,6 +177,33 @@ class DroneRenderer:
             ((200, 255, 150), (150, 200, 100), (230, 255, 200)), # Lime
         ]
 
+        # Track if window should close
+        self._should_close = False
+
+    def process_events(self) -> bool:
+        """Process pygame events without rendering.
+
+        Call this frequently to prevent window from freezing.
+        Returns False if window should close, True otherwise.
+        """
+        if self._should_close:
+            return False
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self._should_close = True
+                return False
+            self._handle_input(event)
+
+        # Handle continuous key presses (camera movement)
+        self._handle_continuous_input()
+
+        return True
+
+    def should_close(self) -> bool:
+        """Check if the window should be closed."""
+        return self._should_close
+
     def render(
         self,
         state: DroneState,
@@ -204,15 +231,10 @@ class DroneRenderer:
             training_metrics: Dict with training stats to display
             additional_states: List of additional drone states for parallel training
         """
-        # Handle pygame events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                return
-            self._handle_input(event)
-
-        # Handle continuous key presses
-        self._handle_continuous_input()
+        # Process pygame events (prevents freezing)
+        if not self.process_events():
+            pygame.quit()
+            return
 
         # Store drone states
         self._drone_state = state

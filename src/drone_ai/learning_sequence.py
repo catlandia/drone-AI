@@ -468,18 +468,33 @@ class LearningSequence:
 
         final_score, grade, stage_scores = self._evaluate_final(best_agent)
 
-        # Save the best model
-        model_path = self.save_dir / "best_graduated_drone.pt"
+        # Save the best model with grade and date format: "P 22-11-2025 v1"
+        # Extract just the grade code (e.g., "P", "S+", "A-", etc.)
+        grade_code = grade.split(" - ")[0]
+        date_str = datetime.now().strftime("%d-%m-%Y")
+
+        # Find next version number
+        version = 1
+        while True:
+            model_filename = f"{grade_code} {date_str} v{version}.pt"
+            model_path = self.save_dir / model_filename
+            if not model_path.exists():
+                break
+            version += 1
+
         best_agent.save(str(model_path))
 
-        # Save results
+        # Save results with matching name
+        results_filename = f"{grade_code} {date_str} v{version}_results.json"
         results = {
             "final_score": final_score,
             "grade": grade,
+            "grade_code": grade_code,
             "stage_scores": stage_scores,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "model_file": model_filename
         }
-        results_path = self.save_dir / "graduation_results.json"
+        results_path = self.save_dir / results_filename
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
 
@@ -492,8 +507,8 @@ class LearningSequence:
         print(f"\n  Stage Breakdown:")
         for stage, score in stage_scores.items():
             print(f"    {stage}: {score:.1f}")
-        print(f"\n  Model saved to: {model_path}")
-        print(f"  Results saved to: {results_path}")
+        print(f"\n  Model saved as: {model_filename}")
+        print(f"  Results saved as: {results_filename}")
         print("="*60 + "\n")
 
         return final_score, grade

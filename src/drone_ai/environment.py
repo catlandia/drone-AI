@@ -184,7 +184,7 @@ class DroneEnv(gym.Env):
             'action_smoothness': 0.3,     # Smooth control inputs
             'alive': 0.05,                # Small survival bonus
             'crash': -50.0,               # Heavy crash penalty (be careful!)
-            'upside_down': -5.0,          # Penalty for being upside down (> 90 deg tilt)
+            'upside_down': -15.0,         # Heavy penalty for being upside down (no longer fatal, just punished)
             'success': 2.0,
 
             # === DELIVERY TASK REWARDS ===
@@ -758,13 +758,9 @@ class DroneEnv(gym.Env):
             return True
 
         position = self.sim.state.position
-        euler = self.sim.state.get_euler_angles()
 
-        # Completely upside-down (>120 degrees tilt) = always crash
-        # This applies to ALL tasks, even at safe zones
-        completely_flipped = abs(euler[0]) > (2 * np.pi / 3) or abs(euler[1]) > (2 * np.pi / 3)
-        if completely_flipped:
-            return True
+        # NOTE: Upside-down no longer causes termination - just penalty in reward function
+        # This allows drones to learn to recover from bad orientations
 
         # Stuck on ground too long - drone should take off
         # After 200 steps (~4 seconds), if still on ground, terminate

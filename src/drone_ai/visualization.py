@@ -80,19 +80,22 @@ class DroneRenderer:
     # Colors
     BACKGROUND = (20, 20, 30)
     GRID_COLOR = (50, 50, 60)
-    DRONE_BODY = (100, 150, 255)
-    DRONE_ARM = (80, 80, 80)
-    MOTOR_CW = (255, 100, 100)  # Clockwise motors
-    MOTOR_CCW = (100, 255, 100)  # Counter-clockwise motors
+    # Drone colors - GREEN theme
+    DRONE_BODY = (50, 200, 50)        # Green body
+    DRONE_BODY_DARK = (30, 150, 30)   # Darker green for frame
+    DRONE_ARM = (60, 60, 60)          # Dark gray arms
+    DRONE_CANOPY = (100, 255, 100)    # Light green canopy
+    MOTOR_HOUSING = (40, 40, 40)      # Black motor housing
+    PROPELLER = (200, 200, 200)       # Light gray propellers
     TARGET = (255, 200, 50)
     TRAJECTORY = (100, 200, 255)
     TEXT_COLOR = (200, 200, 200)
     GROUND = (40, 40, 50)
     # Delivery task colors
-    PACKAGE = (255, 150, 50)       # Orange package
-    PACKAGE_ATTACHED = (50, 255, 50)  # Green when attached
-    PICKUP_ZONE = (100, 255, 255)  # Cyan pickup zone
-    DROPZONE = (255, 100, 255)     # Magenta drop zone
+    PACKAGE = (255, 150, 50)          # Orange package
+    PACKAGE_ATTACHED = (100, 255, 100)  # Light green when attached
+    PICKUP_ZONE = (150, 50, 200)      # PURPLE pickup/reload zone
+    DROPZONE = (255, 50, 50)          # RED drop zone
     DROPZONE_SUCCESS = (50, 255, 50)  # Green on successful delivery
     # Obstacles and waypoints
     OBSTACLE_TREE = (34, 139, 34)     # Forest green
@@ -502,13 +505,15 @@ class DroneRenderer:
                            (screen_pos[0], screen_pos[1] + 15), 2)
 
     def _render_drone(self, state: DroneState):
-        """Render the drone."""
+        """Render the drone as a realistic quadcopter."""
         pos = state.position
         R = state.get_rotation_matrix()
 
-        # Drone dimensions
-        arm_length = 0.2
-        body_size = 0.1
+        # Drone dimensions (scaled for visibility)
+        arm_length = 0.25
+        body_length = 0.12
+        body_width = 0.08
+        prop_radius = 0.08
 
         # Motor positions in body frame (X-configuration)
         motor_positions_body = [
@@ -521,30 +526,95 @@ class DroneRenderer:
         # Transform to world frame
         motor_positions = [pos + R @ mp for mp in motor_positions_body]
 
-        # Draw arms
         center_screen = self._world_to_screen(pos)
-        if center_screen:
-            for i, motor_pos in enumerate(motor_positions):
-                motor_screen = self._world_to_screen(motor_pos)
-                if motor_screen:
-                    pygame.draw.line(self.screen, self.DRONE_ARM, center_screen, motor_screen, 3)
+        if not center_screen:
+            return
 
-            # Draw body
-            pygame.draw.circle(self.screen, self.DRONE_BODY, center_screen, 8)
+        # Draw arms (thick dark gray)
+        for motor_pos in motor_positions:
+            motor_screen = self._world_to_screen(motor_pos)
+            if motor_screen:
+                pygame.draw.line(self.screen, self.DRONE_ARM, center_screen, motor_screen, 4)
 
-            # Draw motors
-            motor_colors = [self.MOTOR_CW, self.MOTOR_CCW, self.MOTOR_CCW, self.MOTOR_CW]
-            for motor_pos, color in zip(motor_positions, motor_colors):
-                motor_screen = self._world_to_screen(motor_pos)
-                if motor_screen:
-                    pygame.draw.circle(self.screen, color, motor_screen, 5)
+        # Draw main body frame (green rectangle shape)
+        body_corners_body = [
+            np.array([body_length, body_width, 0]),
+            np.array([body_length, -body_width, 0]),
+            np.array([-body_length, -body_width, 0]),
+            np.array([-body_length, body_width, 0]),
+        ]
+        body_corners = [pos + R @ c for c in body_corners_body]
+        body_screen = [self._world_to_screen(c) for c in body_corners]
 
-            # Draw direction indicator (forward)
-            forward_body = np.array([body_size * 1.5, 0, 0])
-            forward_world = pos + R @ forward_body
-            forward_screen = self._world_to_screen(forward_world)
-            if forward_screen:
-                pygame.draw.line(self.screen, (255, 255, 100), center_screen, forward_screen, 2)
+        if all(b is not None for b in body_screen):
+            # Fill body
+            pygame.draw.polygon(self.screen, self.DRONE_BODY, body_screen)
+            pygame.draw.polygon(self.screen, self.DRONE_BODY_DARK, body_screen, 2)
+
+        # Draw canopy (raised bump on top) - front-facing dome
+        canopy_pos = pos + R @ np.array([body_length * 0.3, 0, 0.03])
+        canopy_screen = self._world_to_screen(canopy_pos)
+        if canopy_screen:
+            pygame.draw.circle(self.screen, self.DRONE_CANOPY, canopy_screen, 6)
+            pygame.draw.circle(self.screen, self.DRONE_BODY_DARK, canopy_screen, 6, 1)
+
+        # Draw motors and propellers
+        for i, motor_pos in enumerate(motor_positions):
+            motor_screen = self._world_to_screen(motor_pos)
+            if motor_screen:
+                # Motor housing (black circle)
+                pygame.draw.circle(self.screen, self.MOTOR_HOUSING, motor_screen, 6)
+
+                # Propeller disc (semi-transparent circle to show spinning)
+                # Draw as ellipse based on viewing angle
+                prop_points = []
+                n_segments = 12
+                for j in range(n_segments):
+                    angle = 2 * np.pi * j / n_segments
+                    prop_point = motor_pos + R @ np.array([
+                        prop_radius * np.cos(angle),
+                        prop_radius * np.sin(angle),
+                        0.01  # Slightly above motor
+                    ])
+                    screen_point = self._world_to_screen(prop_point)
+                    if screen_point:
+                        prop_points.append(screen_point)
+
+                if len(prop_points) >= 3:
+                    # Draw propeller disc
+                    pygame.draw.polygon(self.screen, (*self.PROPELLER, 80), prop_points, 0)
+                    pygame.draw.lines(self.screen, self.PROPELLER, True, prop_points, 1)
+
+        # Draw landing gear (small legs)
+        gear_positions_body = [
+            np.array([body_length * 0.8, body_width * 0.8, -0.05]),
+            np.array([body_length * 0.8, -body_width * 0.8, -0.05]),
+            np.array([-body_length * 0.8, body_width * 0.8, -0.05]),
+            np.array([-body_length * 0.8, -body_width * 0.8, -0.05]),
+        ]
+        for gear_body in gear_positions_body:
+            gear_top = pos + R @ (gear_body + np.array([0, 0, 0.05]))
+            gear_bottom = pos + R @ gear_body
+            top_screen = self._world_to_screen(gear_top)
+            bottom_screen = self._world_to_screen(gear_bottom)
+            if top_screen and bottom_screen:
+                pygame.draw.line(self.screen, self.DRONE_ARM, top_screen, bottom_screen, 2)
+
+        # Draw direction indicator (forward arrow - bright yellow/green)
+        forward_start = pos + R @ np.array([body_length, 0, 0.02])
+        forward_end = pos + R @ np.array([body_length + 0.1, 0, 0.02])
+        forward_start_screen = self._world_to_screen(forward_start)
+        forward_end_screen = self._world_to_screen(forward_end)
+        if forward_start_screen and forward_end_screen:
+            pygame.draw.line(self.screen, (255, 255, 0), forward_start_screen, forward_end_screen, 3)
+            # Arrow head
+            arrow_left = pos + R @ np.array([body_length + 0.06, 0.03, 0.02])
+            arrow_right = pos + R @ np.array([body_length + 0.06, -0.03, 0.02])
+            arrow_left_screen = self._world_to_screen(arrow_left)
+            arrow_right_screen = self._world_to_screen(arrow_right)
+            if arrow_left_screen and arrow_right_screen:
+                pygame.draw.line(self.screen, (255, 255, 0), forward_end_screen, arrow_left_screen, 2)
+                pygame.draw.line(self.screen, (255, 255, 0), forward_end_screen, arrow_right_screen, 2)
 
     def _render_obstacles(self, obstacles: List[Obstacle]):
         """Render obstacles as 3D cylinders."""
@@ -734,7 +804,7 @@ class DroneRenderer:
         panel_width = 200
         panel_height = 180
         if package is not None:
-            panel_height += 50
+            panel_height += 75  # Extra space for dropzone + reload distances
         if training_metrics is not None:
             panel_height += 100
         panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
@@ -787,12 +857,18 @@ class DroneRenderer:
             text = self.font.render(pkg_text, True, status_color)
             self.screen.blit(text, (20, 175))
 
-            # Distance to drop zone
+            # Distance to drop zone (red)
             dropzone_dist = np.linalg.norm(state.position[:2] - package.dropzone_position[:2])
             dz_text = f"Dropzone: {dropzone_dist:.2f} m"
-            text = self.font.render(dz_text, True, self.DROPZONE)
+            text = self.font.render(dz_text, True, self.DROPZONE)  # Red
             self.screen.blit(text, (20, 200))
-            y_offset = 225
+
+            # Distance to pickup/reload (purple)
+            pickup_dist = np.linalg.norm(state.position[:2] - package.pickup_position[:2])
+            pickup_text = f"Reload: {pickup_dist:.2f} m"
+            text = self.font.render(pickup_text, True, self.PICKUP_ZONE)  # Purple
+            self.screen.blit(text, (20, 225))
+            y_offset = 250
         else:
             y_offset = 175
 

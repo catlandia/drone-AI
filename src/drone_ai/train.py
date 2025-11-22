@@ -3,6 +3,8 @@ Training Script for Drone AI
 
 This script provides a complete training pipeline for the drone flight controller:
 - Training with PPO
+- Multi-environment parallel training (multiple drones)
+- GPU acceleration
 - Logging to TensorBoard
 - Checkpointing
 - Curriculum learning support
@@ -14,7 +16,7 @@ import time
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import numpy as np
 
 import torch
@@ -23,6 +25,16 @@ from tqdm import tqdm
 
 from drone_ai.environment import DroneEnv, TaskType
 from drone_ai.agent import PPOAgent, PPOConfig
+
+
+def get_device_info() -> str:
+    """Get detailed device information."""
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        return f"GPU: {gpu_name} ({gpu_memory:.1f} GB)"
+    else:
+        return "CPU only (no GPU detected - training will be slower)"
 
 
 def parse_args():
@@ -38,11 +50,15 @@ def parse_args():
     parser.add_argument("--domain-randomization", action="store_true",
                        help="Enable domain randomization for sim-to-real")
 
+    # Parallel environments
+    parser.add_argument("--num-envs", type=int, default=1,
+                       help="Number of parallel environments (drones) for faster training")
+
     # Training settings
     parser.add_argument("--total-timesteps", type=int, default=1_000_000,
                        help="Total training timesteps")
     parser.add_argument("--n-steps", type=int, default=2048,
-                       help="Steps per update")
+                       help="Steps per environment per update")
     parser.add_argument("--batch-size", type=int, default=64,
                        help="Minibatch size")
     parser.add_argument("--n-epochs", type=int, default=10,
@@ -90,6 +106,7 @@ class Trainer:
 
     def __init__(self, args):
         self.args = args
+        self.num_envs = args.num_envs
 
         # Set up experiment name
         if args.name is None:
@@ -113,15 +130,23 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(args.seed)
 
-        # Create environment
+        # Create environment(s)
         self.task = TaskType(args.task)
         self.difficulty = args.difficulty
-        self.env = self._create_env(self.difficulty)
 
-        # Create agent
+        # Create parallel environments if num_envs > 1
+        if self.num_envs > 1:
+            self.envs = [self._create_env(self.difficulty, seed=args.seed + i)
+                        for i in range(self.num_envs)]
+            self.env = self.envs[0]  # Reference for dimensions
+        else:
+            self.env = self._create_env(self.difficulty)
+            self.envs = [self.env]
+
+        # Create agent with adjusted buffer size for parallel envs
         ppo_config = PPOConfig(
             learning_rate=args.lr,
-            n_steps=args.n_steps,
+            n_steps=args.n_steps * self.num_envs,  # More data per update
             batch_size=args.batch_size,
             n_epochs=args.n_epochs
         )
@@ -146,20 +171,25 @@ class Trainer:
         self.episode_lengths = []
         self.success_rate = 0.0
 
-        # Visualization
+        # Per-environment tracking
+        self.env_episode_rewards = [0.0] * self.num_envs
+        self.env_episode_lengths = [0] * self.num_envs
+
+        # Visualization (only for first environment)
         self.renderer = None
         if args.render:
             from drone_ai.visualization import DroneRenderer
             self.renderer = DroneRenderer(width=1024, height=768)
-            print("Live visualization enabled")
+            print("Live visualization enabled (showing drone 1)")
 
-    def _create_env(self, difficulty: float) -> DroneEnv:
+    def _create_env(self, difficulty: float, seed: int = None) -> DroneEnv:
         """Create environment with given difficulty."""
-        return DroneEnv(
+        env = DroneEnv(
             task=self.task,
             difficulty=difficulty,
             domain_randomization=self.args.domain_randomization
         )
+        return env
 
     def _render_frame(self, episode_reward: float):
         """Render the current frame with training metrics."""
@@ -211,69 +241,78 @@ class Trainer:
         )
 
     def train(self):
-        """Main training loop."""
-        print(f"Starting training: {self.args.name}")
-        print(f"Device: {self.agent.device}")
+        """Main training loop with parallel environment support."""
+        print(f"\nStarting training: {self.args.name}")
+        print(f"Device: {get_device_info()}")
         print(f"Task: {self.args.task}, Difficulty: {self.difficulty}")
+        print(f"Parallel drones: {self.num_envs}")
         print(f"Total timesteps: {self.args.total_timesteps:,}")
+        if self.num_envs > 1:
+            print(f"Effective steps per update: {self.args.n_steps} x {self.num_envs} = {self.args.n_steps * self.num_envs}")
         print("-" * 50)
 
         pbar = tqdm(total=self.args.total_timesteps, desc="Training")
 
-        obs, info = self.env.reset(seed=self.args.seed)
-        episode_reward = 0
-        episode_length = 0
+        # Initialize all environments
+        observations = []
+        for i, env in enumerate(self.envs):
+            obs, _ = env.reset(seed=self.args.seed + i)
+            observations.append(obs)
 
         while self.total_steps < self.args.total_timesteps:
-            # Collect rollout
+            # Collect rollout from all environments
             for step in range(self.args.n_steps):
-                # Select action
-                action, action_info = self.agent.select_action(obs)
+                # Process each environment
+                for env_idx, env in enumerate(self.envs):
+                    obs = observations[env_idx]
 
-                # Step environment
-                next_obs, reward, terminated, truncated, info = self.env.step(action)
-                done = terminated or truncated
+                    # Select action
+                    action, action_info = self.agent.select_action(obs)
 
-                # Store transition
-                self.agent.store_transition(
-                    obs, action, reward,
-                    action_info['value'],
-                    action_info['log_prob'],
-                    done
-                )
+                    # Step environment
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
 
-                episode_reward += reward
-                episode_length += 1
-                self.total_steps += 1
+                    # Store transition
+                    self.agent.store_transition(
+                        obs, action, reward,
+                        action_info['value'],
+                        action_info['log_prob'],
+                        done
+                    )
 
-                # Live visualization
-                if self.renderer is not None and self.total_steps % self.args.render_freq == 0:
-                    self._render_frame(episode_reward)
+                    self.env_episode_rewards[env_idx] += reward
+                    self.env_episode_lengths[env_idx] += 1
+                    self.total_steps += 1
 
-                if done:
-                    # Record episode stats
-                    self.episode_rewards.append(episode_reward)
-                    self.episode_lengths.append(episode_length)
-                    self.episodes += 1
+                    # Live visualization (only first environment)
+                    if env_idx == 0 and self.renderer is not None and self.total_steps % self.args.render_freq == 0:
+                        self._render_frame(self.env_episode_rewards[0])
 
-                    # Log to TensorBoard
-                    self.writer.add_scalar('episode/reward', episode_reward, self.total_steps)
-                    self.writer.add_scalar('episode/length', episode_length, self.total_steps)
-                    self.writer.add_scalar('episode/position_error',
-                                         info.get('position_error', 0), self.total_steps)
+                    if done:
+                        # Record episode stats
+                        self.episode_rewards.append(self.env_episode_rewards[env_idx])
+                        self.episode_lengths.append(self.env_episode_lengths[env_idx])
+                        self.episodes += 1
 
-                    # Reset
-                    obs, info = self.env.reset()
-                    episode_reward = 0
-                    episode_length = 0
-                else:
-                    obs = next_obs
+                        # Log to TensorBoard
+                        self.writer.add_scalar('episode/reward', self.env_episode_rewards[env_idx], self.total_steps)
+                        self.writer.add_scalar('episode/length', self.env_episode_lengths[env_idx], self.total_steps)
+                        self.writer.add_scalar('episode/position_error',
+                                             info.get('position_error', 0), self.total_steps)
+
+                        # Reset this environment
+                        observations[env_idx], _ = env.reset()
+                        self.env_episode_rewards[env_idx] = 0.0
+                        self.env_episode_lengths[env_idx] = 0
+                    else:
+                        observations[env_idx] = next_obs
 
                 # Update progress bar
-                pbar.update(1)
+                pbar.update(self.num_envs)
 
-            # PPO update
-            update_info = self.agent.update(obs)
+            # PPO update (using last observation from first env for value bootstrap)
+            update_info = self.agent.update(observations[0])
 
             # Log update info
             self.writer.add_scalar('train/loss', update_info['loss'], self.total_steps)
@@ -290,7 +329,11 @@ class Trainer:
                 # Increase difficulty if performing well
                 if mean_reward > -5 and self.difficulty < 1.0:
                     self.difficulty = min(1.0, self.difficulty + 0.05)
-                    self.env = self._create_env(self.difficulty)
+                    # Recreate all environments with new difficulty
+                    for i in range(self.num_envs):
+                        self.envs[i] = self._create_env(self.difficulty)
+                        observations[i], _ = self.envs[i].reset(seed=self.args.seed + i)
+                    self.env = self.envs[0]
                     self.writer.add_scalar('curriculum/difficulty', self.difficulty, self.total_steps)
                     tqdm.write(f"Difficulty increased to {self.difficulty:.2f}")
 
@@ -316,7 +359,8 @@ class Trainer:
                 pbar.set_postfix({
                     'reward': f'{np.mean(recent):.1f}',
                     'episodes': self.episodes,
-                    'difficulty': f'{self.difficulty:.2f}'
+                    'envs': self.num_envs,
+                    'diff': f'{self.difficulty:.2f}'
                 })
 
         pbar.close()

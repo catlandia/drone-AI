@@ -52,6 +52,19 @@ def check_dependencies():
     return missing
 
 
+def get_gpu_status():
+    """Check if GPU is available."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            return f"GPU: {gpu_name}"
+        else:
+            return "CPU only (no GPU - training will be slower)"
+    except ImportError:
+        return "Unknown (PyTorch not installed)"
+
+
 def clear_screen():
     """Clear the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -62,6 +75,7 @@ def print_header():
     print("=" * 60)
     print("            DRONE AI - Delivery Drone Training")
     print("=" * 60)
+    print(f"  {get_gpu_status()}")
     print()
 
 
@@ -100,6 +114,29 @@ def run_command(cmd):
     input("Press Enter to continue...")
 
 
+def get_num_drones_input():
+    """Get the number of parallel drones from user."""
+    print()
+    print("Parallel drones speed up training significantly!")
+    print("  1 drone  = normal speed (with visualization)")
+    print("  4 drones = ~4x faster")
+    print("  8 drones = ~8x faster")
+    print("  Note: More drones = faster training but uses more CPU/memory")
+    print()
+    num_envs = input("Number of parallel drones (default 1, max recommended 16): ").strip()
+    if not num_envs:
+        return "1"
+    try:
+        n = int(num_envs)
+        if n < 1:
+            return "1"
+        if n > 32:
+            print("Warning: Using more than 32 drones may be unstable")
+        return str(n)
+    except ValueError:
+        return "1"
+
+
 def train_hover():
     """Start hover training with live visualization."""
     clear_screen()
@@ -109,19 +146,21 @@ def train_hover():
     print("You will see the training live in a visualization window.")
     print()
     print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
-    print()
 
-    steps = input("Training steps (default 100000): ").strip()
+    steps = input("\nTraining steps (default 100000): ").strip()
     steps = steps if steps else "100000"
 
     difficulty = input("Difficulty 0.0-1.0 (default 0.3): ").strip()
     difficulty = difficulty if difficulty else "0.3"
+
+    num_envs = get_num_drones_input()
 
     cmd = [
         sys.executable, "-m", "drone_ai.train",
         "--task", "hover",
         "--total-timesteps", steps,
         "--difficulty", difficulty,
+        "--num-envs", num_envs,
         "--render",
         "--render-freq", "5"
     ]
@@ -138,19 +177,21 @@ def train_delivery():
     print("You will see the training live in a visualization window.")
     print()
     print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
-    print()
 
-    steps = input("Training steps (default 500000): ").strip()
+    steps = input("\nTraining steps (default 500000): ").strip()
     steps = steps if steps else "500000"
 
     difficulty = input("Difficulty 0.0-1.0 (default 0.5): ").strip()
     difficulty = difficulty if difficulty else "0.5"
+
+    num_envs = get_num_drones_input()
 
     cmd = [
         sys.executable, "-m", "drone_ai.train",
         "--task", "delivery",
         "--total-timesteps", steps,
         "--difficulty", difficulty,
+        "--num-envs", num_envs,
         "--render",
         "--render-freq", "5"
     ]
@@ -172,9 +213,8 @@ def train_delivery_route():
     print()
     print("You will see the training live in a visualization window.")
     print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
-    print()
 
-    steps = input("Training steps (default 1000000): ").strip()
+    steps = input("\nTraining steps (default 1000000): ").strip()
     steps = steps if steps else "1000000"
 
     difficulty = input("Difficulty 0.0-1.0 (default 0.5): ").strip()
@@ -182,11 +222,14 @@ def train_delivery_route():
 
     randomization = input("Enable domain randomization? (y/n, default n): ").strip().lower()
 
+    num_envs = get_num_drones_input()
+
     cmd = [
         sys.executable, "-m", "drone_ai.train",
         "--task", "delivery_route",
         "--total-timesteps", steps,
         "--difficulty", difficulty,
+        "--num-envs", num_envs,
         "--render",
         "--render-freq", "5"
     ]

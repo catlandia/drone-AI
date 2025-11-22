@@ -35,12 +35,28 @@ def check_python_version():
     return True
 
 
-def install_package(package_name, pip_name=None):
-    """Install a single package."""
+def is_package_installed(module_name):
+    """Check if a package is already installed."""
+    try:
+        __import__(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+def install_package(package_name, pip_name=None, module_name=None):
+    """Install a single package if not already installed."""
     if pip_name is None:
         pip_name = package_name
+    if module_name is None:
+        module_name = package_name.lower()
 
-    print(f"  Installing {package_name}...", end=" ", flush=True)
+    # Check if already installed
+    if is_package_installed(module_name):
+        print(f"  {package_name}... already installed")
+        return True
+
+    print(f"  {package_name}... installing...", end=" ", flush=True)
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", pip_name, "-q"],
@@ -61,24 +77,24 @@ def install_package(package_name, pip_name=None):
 
 def install_dependencies():
     """Install all required dependencies."""
-    print("\nInstalling dependencies...")
+    print("\nChecking and installing dependencies...")
     print()
 
-    # Core dependencies
+    # Core dependencies: (display_name, pip_package, import_name)
     packages = [
-        ("NumPy", "numpy>=1.24.0"),
-        ("PyTorch", "torch>=2.0.0"),
-        ("Gymnasium", "gymnasium>=0.29.0"),
-        ("Pygame", "pygame>=2.5.0"),
-        ("Matplotlib", "matplotlib>=3.7.0"),
-        ("TensorBoard", "tensorboard>=2.14.0"),
-        ("PyYAML", "pyyaml>=6.0"),
-        ("tqdm", "tqdm>=4.65.0"),
+        ("NumPy", "numpy>=1.24.0", "numpy"),
+        ("PyTorch", "torch>=2.0.0", "torch"),
+        ("Gymnasium", "gymnasium>=0.29.0", "gymnasium"),
+        ("Pygame", "pygame>=2.5.0", "pygame"),
+        ("Matplotlib", "matplotlib>=3.7.0", "matplotlib"),
+        ("TensorBoard", "tensorboard>=2.14.0", "tensorboard"),
+        ("PyYAML", "pyyaml>=6.0", "yaml"),
+        ("tqdm", "tqdm>=4.65.0", "tqdm"),
     ]
 
     failed = []
-    for name, pip_name in packages:
-        if not install_package(name, pip_name):
+    for name, pip_name, module_name in packages:
+        if not install_package(name, pip_name, module_name):
             failed.append(name)
 
     return failed

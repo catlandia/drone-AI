@@ -184,6 +184,7 @@ class DroneEnv(gym.Env):
             'action_smoothness': 0.3,     # Smooth control inputs
             'alive': 0.05,                # Small survival bonus
             'crash': -50.0,               # Heavy crash penalty (be careful!)
+            'upside_down': -5.0,          # Penalty for being upside down (> 90 deg tilt)
             'success': 2.0,
 
             # === DELIVERY TASK REWARDS ===
@@ -489,6 +490,15 @@ class DroneEnv(gym.Env):
         if self.sim.is_crashed():
             crash_penalty = weights['crash']
 
+        # Upside-down penalty (severe tilt > 60 degrees)
+        # This only kicks in when drone is nearly flipped, not for normal maneuvering
+        upside_down_penalty = 0.0
+        tilt_threshold = np.pi / 3  # 60 degrees
+        if abs(euler[0]) > tilt_threshold or abs(euler[1]) > tilt_threshold:
+            # Stronger penalty the more upside down it is
+            tilt_severity = max(abs(euler[0]), abs(euler[1])) - tilt_threshold
+            upside_down_penalty = weights['upside_down'] * (1 + tilt_severity)
+
         # Delivery-specific rewards
         delivery_reward = 0.0
         if self.task == TaskType.DELIVERY:
@@ -505,6 +515,7 @@ class DroneEnv(gym.Env):
             alive_bonus +
             success_bonus +
             crash_penalty +
+            upside_down_penalty +
             delivery_reward
         )
 

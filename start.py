@@ -87,10 +87,11 @@ def print_menu():
     print("  [2] Train - Delivery (pickup and drop)")
     print("  [3] Train - Delivery Route (1km with obstacles)")
     print("  [4] Train - Deployment Ready (REAL-WORLD simulation!)")
+    print("  [5] Train - FULL LEARNING SEQUENCE (all stages + graduation!)")
     print()
-    print("  [5] Watch Demo (no training)")
-    print("  [6] Evaluate a trained model")
-    print("  [7] Custom training (advanced)")
+    print("  [6] Watch Demo (no training)")
+    print("  [7] Evaluate a trained model")
+    print("  [8] Custom training (advanced)")
     print()
     print("  [0] Exit")
     print()
@@ -302,6 +303,51 @@ def train_deployment_ready():
     run_command(cmd)
 
 
+def train_learning_sequence():
+    """Full learning sequence - all stages with graduation."""
+    clear_screen()
+    print_header()
+    print("FULL LEARNING SEQUENCE")
+    print("=" * 55)
+    print()
+    print("Complete drone training curriculum with graduation!")
+    print()
+    print("Training stages:")
+    print("  1. Hover - Learn basic stabilization")
+    print("  2. Delivery - Learn pickup and drop")
+    print("  3. Delivery Route - Learn 1km navigation")
+    print("  4. Deployment Ready - Handle real-world challenges")
+    print()
+    print("Process:")
+    print("  - All drones train through each stage")
+    print("  - Top 2 drones advance to Round 2")
+    print("  - Final evaluation and GRADUATION GRADE!")
+    print()
+    print("This takes longer but produces the best results!")
+    print()
+
+    population = input("Number of drones (default 6): ").strip()
+    population = population if population else "6"
+
+    ages = input("Ages per stage (default 15): ").strip()
+    ages = ages if ages else "15"
+
+    steps = input("Steps per age (default 15000): ").strip()
+    steps = steps if steps else "15000"
+
+    render = input("Show visualization? (y/n, default y): ").strip().lower()
+    render_flag = [] if render == 'n' else ["--render", "--render-freq", "5"]
+
+    cmd = [
+        sys.executable, "-m", "drone_ai.learning_sequence",
+        "--population-size", population,
+        "--ages-per-stage", ages,
+        "--steps-per-age", steps,
+    ] + render_flag
+
+    run_command(cmd)
+
+
 def watch_demo():
     """Run visualization demo."""
     clear_screen()
@@ -455,10 +501,12 @@ def main():
         elif choice == "4":
             train_deployment_ready()
         elif choice == "5":
-            watch_demo()
+            train_learning_sequence()
         elif choice == "6":
-            evaluate_model()
+            watch_demo()
         elif choice == "7":
+            evaluate_model()
+        elif choice == "8":
             custom_training()
         elif choice == "0":
             print("\nGoodbye!")

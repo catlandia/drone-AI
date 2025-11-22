@@ -132,7 +132,7 @@ class PackageConfig:
     mass: float = 0.010  # 10 grams
     size: float = 0.05   # 5cm cube (for collision)
     drag_coeff: float = 0.5  # Drag during fall
-    pickup_radius: float = 0.15  # How close drone must be to pickup
+    pickup_radius: float = 0.5  # How close drone must be to pickup (larger for easier landing)
     drop_zone_radius: float = 0.3  # Target zone radius for successful delivery
 
 
@@ -564,6 +564,15 @@ class DroneSimulation:
         # This allows for more aggressive maneuvers during pickup/landing
         severely_tilted = abs(euler[0]) > np.pi/3 or abs(euler[1]) > np.pi/3
 
+        # Check if at a safe landing zone (pickup/base zone)
+        at_safe_zone = False
+        if self.package is not None:
+            # Check if near pickup zone
+            dist_to_pickup = np.linalg.norm(
+                self.state.position[:2] - self.package.pickup_position[:2]
+            )
+            at_safe_zone = dist_to_pickup < self.package_config.pickup_radius * 1.5
+
         # Check for extreme velocities
         high_velocity = np.linalg.norm(self.state.velocity) > 20
         high_angular = np.linalg.norm(self.state.angular_velocity) > 30
@@ -571,9 +580,11 @@ class DroneSimulation:
         # Check obstacle collision
         obstacle_hit = self._obstacle_collision or self.check_obstacle_collision()
 
-        # Only crash if on ground with SEVERE tilt, or extreme velocities
-        # Being on ground without severe tilt is OK (for starting/landing)
-        return (on_ground and severely_tilted) or high_velocity or high_angular or obstacle_hit
+        # Landing at safe zone (pickup/base) is OK even with some tilt
+        # Only crash if severely tilted AND not at safe zone
+        ground_crash = on_ground and severely_tilted and not at_safe_zone
+
+        return ground_crash or high_velocity or high_angular or obstacle_hit
 
     def check_obstacle_collision(self) -> bool:
         """Check if drone collides with any obstacle."""

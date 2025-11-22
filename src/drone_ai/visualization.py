@@ -769,9 +769,10 @@ class DroneRenderer:
 
     def _render_delivery_zones(self, package: PackageState, dropzone_radius: float):
         """Render pickup and drop zones for delivery task."""
-        # Pickup zone (cyan circle on ground)
+        # Pickup zone (purple circle on ground) - larger radius for landing
         pickup_pos = package.pickup_position.copy()
         pickup_pos[2] = 0.01  # Slightly above ground to be visible
+        pickup_radius = 0.5  # Match PackageConfig.pickup_radius
 
         # Draw pickup zone as a circle
         n_segments = 16
@@ -779,8 +780,8 @@ class DroneRenderer:
         for i in range(n_segments + 1):
             angle = 2 * np.pi * i / n_segments
             point = pickup_pos + np.array([
-                0.2 * np.cos(angle),
-                0.2 * np.sin(angle),
+                pickup_radius * np.cos(angle),
+                pickup_radius * np.sin(angle),
                 0
             ])
             screen_point = self._world_to_screen(point)

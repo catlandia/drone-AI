@@ -377,11 +377,11 @@ class LearningSequence:
         elif final_score > 400:
             grade = "A- - ALPHA- (Strong alpha potential!)"
         elif final_score > 350:
-            grade = "B+ - BEAST+ (Impressive beast mode!)"
+            grade = "B+ - BETTER+ (Impressive improvement!)"
         elif final_score > 300:
-            grade = "B - BEAST (Solid beast performance!)"
+            grade = "B - BETTER (Solid performance!)"
         elif final_score > 250:
-            grade = "B- - BEAST- (Emerging beast!)"
+            grade = "B- - BETTER- (Getting better!)"
         elif final_score > 200:
             grade = "C+ - COOL+ (Pretty cool drone!)"
         elif final_score > 150:

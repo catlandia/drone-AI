@@ -582,11 +582,13 @@ class DroneRenderer:
         """Render the hover zone as a semi-transparent sphere (10% visible).
 
         The hover zone is the 0.5m radius area where the drone should stay.
+        Draws directly on screen for visibility (pygame alpha blending is tricky).
         """
         n_segments = 24
 
-        # Create a surface for semi-transparent drawing
-        temp_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        # Use a visible color for the wireframe (light green, semi-transparent feel)
+        # Drawing directly on screen - no alpha surface needed for lines
+        line_color = self.HOVER_ZONE  # (100, 255, 100) - light green
 
         # Draw the equator circle (main horizontal ring at target height)
         equator_points = []
@@ -601,15 +603,9 @@ class DroneRenderer:
             if screen_point:
                 equator_points.append(screen_point)
 
-        # Fill the equator circle with transparent color
+        # Draw equator outline directly on screen (visible!)
         if len(equator_points) >= 3:
-            pygame.draw.polygon(temp_surface,
-                              (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA),
-                              equator_points)
-            # Draw outline more visible
-            pygame.draw.lines(temp_surface,
-                            (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 4),
-                            True, equator_points, 2)
+            pygame.draw.lines(self.screen, line_color, True, equator_points, 2)
 
         # Draw top circle (smaller, at top of sphere)
         top_points = []
@@ -626,9 +622,7 @@ class DroneRenderer:
                 top_points.append(screen_point)
 
         if len(top_points) >= 3:
-            pygame.draw.lines(temp_surface,
-                            (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 3),
-                            True, top_points, 1)
+            pygame.draw.lines(self.screen, line_color, True, top_points, 1)
 
         # Draw bottom circle
         bottom_points = []
@@ -644,12 +638,10 @@ class DroneRenderer:
                 bottom_points.append(screen_point)
 
         if len(bottom_points) >= 3:
-            pygame.draw.lines(temp_surface,
-                            (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 3),
-                            True, bottom_points, 1)
+            pygame.draw.lines(self.screen, line_color, True, bottom_points, 1)
 
         # Draw vertical meridian lines for 3D effect
-        for i in range(0, n_segments, 3):  # Every 3rd segment
+        for i in range(0, n_segments, 4):  # Every 4th segment
             angle = 2 * np.pi * i / n_segments
 
             # Draw arc from top to bottom through equator
@@ -666,12 +658,7 @@ class DroneRenderer:
                     arc_points.append(screen_point)
 
             if len(arc_points) >= 2:
-                pygame.draw.lines(temp_surface,
-                                (*self.HOVER_ZONE, self.HOVER_ZONE_ALPHA * 3),
-                                False, arc_points, 1)
-
-        # Blit the transparent surface onto the main screen
-        self.screen.blit(temp_surface, (0, 0))
+                pygame.draw.lines(self.screen, line_color, False, arc_points, 1)
 
     def _render_drone(self, state: DroneState, colors: tuple = None, alpha: int = 255):
         """Render the drone as a realistic quadcopter.

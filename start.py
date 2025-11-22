@@ -87,15 +87,14 @@ def print_menu():
     print("  [2] Train - Delivery (pickup and drop)")
     print("  [3] Train - Delivery Route (1km with obstacles)")
     print()
-    print("  [4] Evolutionary Training (best drone survives!)")
-    print()
-    print("  [5] Watch Demo (no training)")
-    print("  [6] Evaluate a trained model")
-    print("  [7] Custom training (advanced)")
+    print("  [4] Watch Demo (no training)")
+    print("  [5] Evaluate a trained model")
+    print("  [6] Custom training (advanced)")
     print()
     print("  [0] Exit")
     print()
-    print("All training includes LIVE visualization so you can watch the drone learn!")
+    print("All training uses EVOLUTIONARY learning - best drone survives!")
+    print("Watch multiple drones compete and evolve in real-time!")
     print()
 
 
@@ -139,129 +138,16 @@ def get_num_drones_input():
         return "1"
 
 
-def train_hover():
-    """Start hover training with live visualization."""
-    clear_screen()
-    print_header()
-    print("TRAINING: Hover Task")
-    print("The drone will learn to stabilize and hover in place.")
-    print("You will see the training live in a visualization window.")
+def get_evolutionary_params():
+    """Get common evolutionary training parameters."""
     print()
-    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
-
-    steps = input("\nTraining steps (default 100000): ").strip()
-    steps = steps if steps else "100000"
-
-    difficulty = input("Difficulty 0.0-1.0 (default 0.3): ").strip()
-    difficulty = difficulty if difficulty else "0.3"
-
-    num_envs = get_num_drones_input()
-
-    cmd = [
-        sys.executable, "-m", "drone_ai.train",
-        "--task", "hover",
-        "--total-timesteps", steps,
-        "--difficulty", difficulty,
-        "--num-envs", num_envs,
-        "--render",
-        "--render-freq", "5"
-    ]
-
-    run_command(cmd)
-
-
-def train_delivery():
-    """Start delivery training with live visualization."""
-    clear_screen()
-    print_header()
-    print("TRAINING: Delivery Task")
-    print("The drone will learn to pick up packages and drop them accurately.")
-    print("You will see the training live in a visualization window.")
-    print()
-    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
-
-    steps = input("\nTraining steps (default 500000): ").strip()
-    steps = steps if steps else "500000"
-
-    difficulty = input("Difficulty 0.0-1.0 (default 0.5): ").strip()
-    difficulty = difficulty if difficulty else "0.5"
-
-    num_envs = get_num_drones_input()
-
-    cmd = [
-        sys.executable, "-m", "drone_ai.train",
-        "--task", "delivery",
-        "--total-timesteps", steps,
-        "--difficulty", difficulty,
-        "--num-envs", num_envs,
-        "--render",
-        "--render-freq", "5"
-    ]
-
-    run_command(cmd)
-
-
-def train_delivery_route():
-    """Start long-range delivery route training with live visualization."""
-    clear_screen()
-    print_header()
-    print("TRAINING: Delivery Route (Long-Range)")
-    print("The drone will learn to:")
-    print("  - Fly up to 1km to a dropzone")
-    print("  - Navigate through waypoints")
-    print("  - Avoid obstacles (trees, buildings)")
-    print("  - Drop packages within 5m accuracy")
-    print("  - Return to base and reload")
-    print()
-    print("You will see the training live in a visualization window.")
-    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
-
-    steps = input("\nTraining steps (default 1000000): ").strip()
-    steps = steps if steps else "1000000"
-
-    difficulty = input("Difficulty 0.0-1.0 (default 0.5): ").strip()
-    difficulty = difficulty if difficulty else "0.5"
-
-    randomization = input("Enable domain randomization? (y/n, default n): ").strip().lower()
-
-    num_envs = get_num_drones_input()
-
-    cmd = [
-        sys.executable, "-m", "drone_ai.train",
-        "--task", "delivery_route",
-        "--total-timesteps", steps,
-        "--difficulty", difficulty,
-        "--num-envs", num_envs,
-        "--render",
-        "--render-freq", "5"
-    ]
-
-    if randomization == 'y':
-        cmd.append("--domain-randomization")
-
-    run_command(cmd)
-
-
-def train_evolutionary():
-    """Start evolutionary training - best drone survives!"""
-    clear_screen()
-    print_header()
-    print("EVOLUTIONARY TRAINING")
-    print()
-    print("How it works:")
-    print("  - Multiple drones train simultaneously (population)")
-    print("  - After each 'age', drones are evaluated by fitness (reward)")
-    print("  - Best performers are selected and mutated")
-    print("  - Poor performers are replaced with mutated copies of winners")
-    print("  - Over time, the BEST drone emerges through survival of the fittest!")
-    print()
-    print("All drones are visualized (semi-transparent) so you can watch evolution!")
+    print("EVOLUTIONARY TRAINING - Best drone survives!")
+    print("  - Multiple drones compete simultaneously")
+    print("  - After each age, best performers are selected")
+    print("  - Poor performers are replaced with mutated winners")
     print()
 
-    task = input("Task (hover/delivery/delivery_route, default hover): ").strip()
-    task = task if task else "hover"
-
-    population = input("Population size - number of drones (default 8): ").strip()
+    population = input("Population size (default 8): ").strip()
     population = population if population else "8"
 
     ages = input("Number of ages/generations (default 50): ").strip()
@@ -270,12 +156,90 @@ def train_evolutionary():
     steps_per_age = input("Steps per age (default 10000): ").strip()
     steps_per_age = steps_per_age if steps_per_age else "10000"
 
-    difficulty = input("Difficulty 0.0-1.0 (default 0.3): ").strip()
+    return population, ages, steps_per_age
+
+
+def train_hover():
+    """Start hover training with evolutionary learning."""
+    clear_screen()
+    print_header()
+    print("TRAINING: Hover Task (Evolutionary)")
+    print("The drones will compete to learn stabilization and hovering.")
+    print("Watch multiple drones evolve - best ones survive!")
+    print()
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
+
+    difficulty = input("\nDifficulty 0.0-1.0 (default 0.3): ").strip()
     difficulty = difficulty if difficulty else "0.3"
+
+    population, ages, steps_per_age = get_evolutionary_params()
 
     cmd = [
         sys.executable, "-m", "drone_ai.evolutionary_train",
-        "--task", task,
+        "--task", "hover",
+        "--population-size", population,
+        "--num-ages", ages,
+        "--steps-per-age", steps_per_age,
+        "--difficulty", difficulty,
+        "--render",
+        "--render-freq", "10"
+    ]
+
+    run_command(cmd)
+
+
+def train_delivery():
+    """Start delivery training with evolutionary learning."""
+    clear_screen()
+    print_header()
+    print("TRAINING: Delivery Task (Evolutionary)")
+    print("The drones will compete to learn package pickup and drop.")
+    print("Watch multiple drones evolve - best ones survive!")
+    print()
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
+
+    difficulty = input("\nDifficulty 0.0-1.0 (default 0.5): ").strip()
+    difficulty = difficulty if difficulty else "0.5"
+
+    population, ages, steps_per_age = get_evolutionary_params()
+
+    cmd = [
+        sys.executable, "-m", "drone_ai.evolutionary_train",
+        "--task", "delivery",
+        "--population-size", population,
+        "--num-ages", ages,
+        "--steps-per-age", steps_per_age,
+        "--difficulty", difficulty,
+        "--render",
+        "--render-freq", "10"
+    ]
+
+    run_command(cmd)
+
+
+def train_delivery_route():
+    """Start long-range delivery route training with evolutionary learning."""
+    clear_screen()
+    print_header()
+    print("TRAINING: Delivery Route - 1km (Evolutionary)")
+    print("The drones will compete to learn:")
+    print("  - Fly up to 1km to a dropzone")
+    print("  - Navigate through waypoints")
+    print("  - Avoid obstacles (trees, buildings)")
+    print("  - Drop packages within 5m accuracy")
+    print("  - Return to base and reload")
+    print()
+    print("Watch multiple drones evolve - best ones survive!")
+    print("Camera controls: 1-4 switch views, arrows rotate, +/- zoom")
+
+    difficulty = input("\nDifficulty 0.0-1.0 (default 0.5): ").strip()
+    difficulty = difficulty if difficulty else "0.5"
+
+    population, ages, steps_per_age = get_evolutionary_params()
+
+    cmd = [
+        sys.executable, "-m", "drone_ai.evolutionary_train",
+        "--task", "delivery_route",
         "--population-size", population,
         "--num-ages", ages,
         "--steps-per-age", steps_per_age,
@@ -438,12 +402,10 @@ def main():
         elif choice == "3":
             train_delivery_route()
         elif choice == "4":
-            train_evolutionary()
-        elif choice == "5":
             watch_demo()
-        elif choice == "6":
+        elif choice == "5":
             evaluate_model()
-        elif choice == "7":
+        elif choice == "6":
             custom_training()
         elif choice == "0":
             print("\nGoodbye!")

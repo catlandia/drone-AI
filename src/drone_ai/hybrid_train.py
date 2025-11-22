@@ -313,10 +313,27 @@ class HybridTrainer:
             self.current_age = age
             print(f"\n--- AGE {age + 1}/{self.args.num_ages} ---")
 
-            # Initialize environments
+            # Initialize environments - ALL drones spawn at SAME location
+            # Use same seed for all so they get same pickup/dropzone positions
+            base_seed = self.args.seed + age * 1000
             observations = []
-            for i, env in enumerate(self.envs):
-                obs, _ = env.reset(seed=self.args.seed + i + age * 1000)
+
+            # Reset first environment to get shared positions
+            obs, _ = self.envs[0].reset(seed=base_seed)
+            observations.append(obs)
+
+            # Copy positions from first env to all others (same spawn location)
+            shared_pickup = self.envs[0].pickup_position.copy()
+            shared_dropzone = self.envs[0].dropzone_position.copy()
+            shared_target = self.envs[0].target_position.copy()
+
+            for i in range(1, self.population_size):
+                env = self.envs[i]
+                # Set same positions before reset
+                env.pickup_position = shared_pickup.copy()
+                env.dropzone_position = shared_dropzone.copy()
+                env.target_position = shared_target.copy()
+                obs, _ = env.reset(seed=base_seed)  # Same seed = same positions
                 observations.append(obs)
 
             # Track rewards per drone
@@ -381,9 +398,22 @@ class HybridTrainer:
 
                 # Check if ALL drones are dead - if so, reset all of them
                 if not any(drone_alive):
-                    # Reset all environments
-                    for i, env in enumerate(self.envs):
-                        observations[i], _ = env.reset(seed=self.args.seed + i + age * 1000 + step)
+                    # Reset all environments at SAME location
+                    reset_seed = base_seed + step
+                    observations[0], _ = self.envs[0].reset(seed=reset_seed)
+                    # Copy positions from first env
+                    shared_pickup = self.envs[0].pickup_position.copy()
+                    shared_dropzone = self.envs[0].dropzone_position.copy()
+                    shared_target = self.envs[0].target_position.copy()
+                    drone_alive[0] = True
+                    drone_episode_rewards[0] = 0.0
+
+                    for i in range(1, self.population_size):
+                        env = self.envs[i]
+                        env.pickup_position = shared_pickup.copy()
+                        env.dropzone_position = shared_dropzone.copy()
+                        env.target_position = shared_target.copy()
+                        observations[i], _ = env.reset(seed=reset_seed)
                         drone_alive[i] = True
                         drone_episode_rewards[i] = 0.0
 

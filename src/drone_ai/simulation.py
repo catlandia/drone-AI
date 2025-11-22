@@ -571,11 +571,20 @@ class DroneSimulation:
             dist_to_pickup = np.linalg.norm(
                 self.state.position[:2] - self.package.pickup_position[:2]
             )
-            at_safe_zone = dist_to_pickup < self.package_config.pickup_radius * 1.5
+            at_safe_zone = dist_to_pickup < self.package_config.pickup_radius * 2.0
 
-        # Check for extreme velocities
-        high_velocity = np.linalg.norm(self.state.velocity) > 20
-        high_angular = np.linalg.norm(self.state.angular_velocity) > 30
+            # Also check near dropzone
+            dist_to_dropzone = np.linalg.norm(
+                self.state.position[:2] - self.package.dropzone_position[:2]
+            )
+            if dist_to_dropzone < self.package_config.drop_zone_radius * 2.0:
+                at_safe_zone = True
+
+        # Check for extreme velocities - relaxed thresholds for learning
+        # 50 m/s = 180 km/h - very fast but allows aggressive learning
+        high_velocity = np.linalg.norm(self.state.velocity) > 50
+        # 100 rad/s = ~16 rotations/sec - allows spinning during learning
+        high_angular = np.linalg.norm(self.state.angular_velocity) > 100
 
         # Check obstacle collision
         obstacle_hit = self._obstacle_collision or self.check_obstacle_collision()

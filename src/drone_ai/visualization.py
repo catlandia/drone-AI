@@ -140,7 +140,9 @@ class DroneRenderer:
 
         # Store drone state for FPV mode
         self._drone_state = None
+        self._drone_states = []  # For multiple drones
         self._dropzone_position = None
+        self._num_drones = 1
 
         # Rendering settings
         self.show_trajectory = True
@@ -155,6 +157,26 @@ class DroneRenderer:
             CameraMode.FPV: "FPV (Drone)"
         }
 
+        # Colors for multiple drones (up to 16)
+        self.drone_colors = [
+            ((50, 200, 50), (30, 150, 30), (100, 255, 100)),    # Green (drone 1)
+            ((50, 150, 255), (30, 100, 200), (100, 200, 255)),  # Blue
+            ((255, 150, 50), (200, 100, 30), (255, 200, 100)),  # Orange
+            ((255, 50, 150), (200, 30, 100), (255, 100, 200)),  # Pink
+            ((150, 50, 255), (100, 30, 200), (200, 100, 255)),  # Purple
+            ((255, 255, 50), (200, 200, 30), (255, 255, 150)),  # Yellow
+            ((50, 255, 255), (30, 200, 200), (100, 255, 255)),  # Cyan
+            ((255, 100, 100), (200, 70, 70), (255, 150, 150)),  # Red
+            ((100, 255, 100), (70, 200, 70), (150, 255, 150)),  # Light green
+            ((100, 100, 255), (70, 70, 200), (150, 150, 255)),  # Light blue
+            ((255, 200, 100), (200, 150, 70), (255, 230, 150)), # Peach
+            ((200, 100, 255), (150, 70, 200), (230, 150, 255)), # Lavender
+            ((100, 255, 200), (70, 200, 150), (150, 255, 230)), # Mint
+            ((255, 150, 150), (200, 100, 100), (255, 200, 200)), # Salmon
+            ((150, 200, 255), (100, 150, 200), (200, 230, 255)), # Sky blue
+            ((200, 255, 150), (150, 200, 100), (230, 255, 200)), # Lime
+        ]
+
     def render(
         self,
         state: DroneState,
@@ -165,12 +187,13 @@ class DroneRenderer:
         obstacles: Optional[List[Obstacle]] = None,
         waypoints: Optional[List[np.ndarray]] = None,
         current_waypoint_idx: int = 0,
-        training_metrics: Optional[Dict] = None
+        training_metrics: Optional[Dict] = None,
+        additional_states: Optional[List[DroneState]] = None
     ):
         """Render the current state.
 
         Args:
-            state: Current drone state
+            state: Current drone state (drone 1)
             target: Target position
             trajectory: List of past positions
             package: Optional package state for delivery task
@@ -179,6 +202,7 @@ class DroneRenderer:
             waypoints: List of waypoint positions
             current_waypoint_idx: Index of current target waypoint
             training_metrics: Dict with training stats to display
+            additional_states: List of additional drone states for parallel training
         """
         # Handle pygame events
         for event in pygame.event.get():
@@ -190,8 +214,18 @@ class DroneRenderer:
         # Handle continuous key presses
         self._handle_continuous_input()
 
-        # Store drone state for camera calculations
+        # Store drone states
         self._drone_state = state
+        if additional_states:
+            self._drone_states = [state] + additional_states
+            self._num_drones = len(self._drone_states)
+            # Disable FPV mode if multiple drones
+            if self.camera.mode == CameraMode.FPV and self._num_drones > 1:
+                self.camera.mode = CameraMode.FOLLOW
+                print("FPV disabled for multiple drones - switched to Follow mode")
+        else:
+            self._drone_states = [state]
+            self._num_drones = 1
 
         # Update dropzone position if package exists
         if package is not None:
@@ -223,7 +257,11 @@ class DroneRenderer:
 
         self._render_trajectory(trajectory)
         self._render_target(target)
-        self._render_drone(state)
+
+        # Render all drones
+        for i, drone_state in enumerate(self._drone_states):
+            colors = self.drone_colors[i % len(self.drone_colors)]
+            self._render_drone(drone_state, colors)
 
         # Render HUD
         if self.show_hud:
@@ -293,8 +331,12 @@ class DroneRenderer:
                 self.camera.mode = CameraMode.FINISH
                 print("Camera: Finish point view")
             elif event.key == pygame.K_4:
-                self.camera.mode = CameraMode.FPV
-                print("Camera: FPV (drone perspective)")
+                # FPV only available for single drone
+                if self._num_drones > 1:
+                    print("Camera: FPV unavailable with multiple drones")
+                else:
+                    self.camera.mode = CameraMode.FPV
+                    print("Camera: FPV (drone perspective)")
             elif event.key == pygame.K_t:
                 self.show_trajectory = not self.show_trajectory
             elif event.key == pygame.K_h:
@@ -504,10 +546,23 @@ class DroneRenderer:
                            (screen_pos[0], screen_pos[1] - 15),
                            (screen_pos[0], screen_pos[1] + 15), 2)
 
-    def _render_drone(self, state: DroneState):
-        """Render the drone as a realistic quadcopter."""
+    def _render_drone(self, state: DroneState, colors: tuple = None):
+        """Render the drone as a realistic quadcopter.
+
+        Args:
+            state: Drone state to render
+            colors: Tuple of (body_color, dark_color, canopy_color) or None for defaults
+        """
         pos = state.position
         R = state.get_rotation_matrix()
+
+        # Get colors (default green if not specified)
+        if colors is None:
+            body_color = self.DRONE_BODY
+            dark_color = self.DRONE_BODY_DARK
+            canopy_color = self.DRONE_CANOPY
+        else:
+            body_color, dark_color, canopy_color = colors
 
         # Drone dimensions (scaled for visibility)
         arm_length = 0.25
@@ -548,15 +603,15 @@ class DroneRenderer:
 
         if all(b is not None for b in body_screen):
             # Fill body
-            pygame.draw.polygon(self.screen, self.DRONE_BODY, body_screen)
-            pygame.draw.polygon(self.screen, self.DRONE_BODY_DARK, body_screen, 2)
+            pygame.draw.polygon(self.screen, body_color, body_screen)
+            pygame.draw.polygon(self.screen, dark_color, body_screen, 2)
 
         # Draw canopy (raised bump on top) - front-facing dome
         canopy_pos = pos + R @ np.array([body_length * 0.3, 0, 0.03])
         canopy_screen = self._world_to_screen(canopy_pos)
         if canopy_screen:
-            pygame.draw.circle(self.screen, self.DRONE_CANOPY, canopy_screen, 6)
-            pygame.draw.circle(self.screen, self.DRONE_BODY_DARK, canopy_screen, 6, 1)
+            pygame.draw.circle(self.screen, canopy_color, canopy_screen, 6)
+            pygame.draw.circle(self.screen, dark_color, canopy_screen, 6, 1)
 
         # Draw motors and propellers
         for i, motor_pos in enumerate(motor_positions):

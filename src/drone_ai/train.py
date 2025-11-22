@@ -175,12 +175,16 @@ class Trainer:
         self.env_episode_rewards = [0.0] * self.num_envs
         self.env_episode_lengths = [0] * self.num_envs
 
-        # Visualization (only for first environment)
+        # Visualization (shows ALL drones)
         self.renderer = None
         if args.render:
             from drone_ai.visualization import DroneRenderer
             self.renderer = DroneRenderer(width=1024, height=768)
-            print("Live visualization enabled (showing drone 1)")
+            if self.num_envs > 1:
+                print(f"Live visualization enabled (showing all {self.num_envs} drones)")
+                print("Note: FPV mode unavailable with multiple drones")
+            else:
+                print("Live visualization enabled")
 
     def _create_env(self, difficulty: float, seed: int = None) -> DroneEnv:
         """Create environment with given difficulty."""
@@ -227,7 +231,12 @@ class Trainer:
             waypoints = self.env.route_waypoints
             current_waypoint_idx = self.env.current_waypoint_idx
 
-        # Render
+        # Get additional drone states if multiple environments
+        additional_states = None
+        if self.num_envs > 1:
+            additional_states = [env.sim.state for env in self.envs[1:]]
+
+        # Render all drones
         self.renderer.render(
             state=state,
             target=target,
@@ -237,7 +246,8 @@ class Trainer:
             obstacles=obstacles,
             waypoints=waypoints,
             current_waypoint_idx=current_waypoint_idx,
-            training_metrics=training_metrics
+            training_metrics=training_metrics,
+            additional_states=additional_states
         )
 
     def train(self):

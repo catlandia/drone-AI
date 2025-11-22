@@ -12,6 +12,26 @@ import sys
 import subprocess
 
 
+def get_src_path():
+    """Get the path to the src directory."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, "src")
+
+
+def get_env_with_pythonpath():
+    """Get environment with src added to PYTHONPATH."""
+    env = os.environ.copy()
+    src_path = get_src_path()
+
+    # Add src to PYTHONPATH
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = src_path + os.pathsep + env["PYTHONPATH"]
+    else:
+        env["PYTHONPATH"] = src_path
+
+    return env
+
+
 def clear_screen():
     """Clear the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -49,7 +69,9 @@ def run_command(cmd):
     print(f"Running: {' '.join(cmd)}")
     print("-" * 60)
     try:
-        subprocess.run(cmd, check=True)
+        # Use environment with PYTHONPATH set to find drone_ai module
+        env = get_env_with_pythonpath()
+        subprocess.run(cmd, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"\nCommand failed with error: {e}")
     except KeyboardInterrupt:

@@ -168,7 +168,7 @@ class HybridTrainer:
                 obs_dim=obs_dim,
                 action_dim=action_dim,
                 config=ppo_config,
-                device=args.device
+                device=str(self.device)  # Use resolved device (cuda:0 or cpu)
             )
             self.population.append(agent)
 
@@ -291,7 +291,10 @@ class HybridTrainer:
         print(f"\n{'='*60}")
         print(f"  HYBRID PPO + EVOLUTION TRAINING")
         print(f"{'='*60}")
-        print(f"Device: {get_device_info()}")
+        print(f"Hardware: {get_device_info()}")
+        print(f"Using: {self.device} for neural network training")
+        if self.device.type == 'cuda':
+            print(f"  GPU Memory: {torch.cuda.memory_allocated()/1024**2:.1f}MB allocated")
         print(f"Task: {self.args.task}, Difficulty: {self.difficulty}")
         print(f"Population: {self.population_size} drones (each with unique brain)")
         print(f"Ages: {self.args.num_ages}")

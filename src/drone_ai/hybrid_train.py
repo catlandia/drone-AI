@@ -74,8 +74,8 @@ def parse_args():
     # PPO training settings
     parser.add_argument("--lr", type=float, default=3e-4,
                        help="Learning rate for PPO")
-    parser.add_argument("--n-steps", type=int, default=2048,
-                       help="Steps before PPO update")
+    parser.add_argument("--n-steps", type=int, default=256,
+                       help="Steps before PPO update (lower = faster learning)")
     parser.add_argument("--batch-size", type=int, default=64,
                        help="PPO minibatch size")
     parser.add_argument("--n-epochs", type=int, default=10,

@@ -121,7 +121,7 @@ class LearningSequence:
 
         ppo_config = PPOConfig(
             learning_rate=3e-4,
-            n_steps=2048,
+            n_steps=256,  # Lower for faster updates
             batch_size=64,
             n_epochs=10
         )
@@ -230,7 +230,7 @@ class LearningSequence:
                     else:
                         observations[i] = next_obs
 
-                    if steps_since_update[i] >= 2048:
+                    if steps_since_update[i] >= 256:
                         agent.update(observations[i])
                         steps_since_update[i] = 0
 

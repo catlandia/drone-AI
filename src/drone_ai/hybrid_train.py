@@ -396,26 +396,11 @@ class HybridTrainer:
                         agent.update(observations[i])
                         steps_since_update[i] = 0
 
-                # Check if ALL drones are dead - if so, reset all of them
+                # If ALL drones are dead, end this age early
+                # (drones stay dead until next age - no mid-age respawns)
                 if not any(drone_alive):
-                    # Reset all environments at SAME location
-                    reset_seed = base_seed + step
-                    observations[0], _ = self.envs[0].reset(seed=reset_seed)
-                    # Copy positions from first env
-                    shared_pickup = self.envs[0].pickup_position.copy()
-                    shared_dropzone = self.envs[0].dropzone_position.copy()
-                    shared_target = self.envs[0].target_position.copy()
-                    drone_alive[0] = True
-                    drone_episode_rewards[0] = 0.0
-
-                    for i in range(1, self.population_size):
-                        env = self.envs[i]
-                        env.pickup_position = shared_pickup.copy()
-                        env.dropzone_position = shared_dropzone.copy()
-                        env.target_position = shared_target.copy()
-                        observations[i], _ = env.reset(seed=reset_seed)
-                        drone_alive[i] = True
-                        drone_episode_rewards[i] = 0.0
+                    print(f"\n  All drones crashed at step {step}! Ending age early.")
+                    break
 
                 total_steps += alive_count  # Only count steps for alive drones
                 pbar.update(1)

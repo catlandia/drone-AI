@@ -509,13 +509,13 @@ class LearningSequence:
                 except ValueError:
                     pass
 
-        model_filename = f"{grade_code} {date_str} v{version}.pt"
+        model_filename = f"{grade_code} {date_str} flycontrol v{version}.pt"
         model_path = self.save_dir / model_filename
 
         best_agent.save(str(model_path))
 
         # Save results with matching name
-        results_filename = f"{grade_code} {date_str} v{version}_results.json"
+        results_filename = f"{grade_code} {date_str} flycontrol v{version}_results.json"
         results = {
             "final_score": final_score,
             "grade": grade,

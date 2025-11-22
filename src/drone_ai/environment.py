@@ -757,8 +757,22 @@ class DroneEnv(gym.Env):
         if self.sim.is_crashed():
             return True
 
-        # Out of bounds - expanded for long-range routes
         position = self.sim.state.position
+        euler = self.sim.state.get_euler_angles()
+
+        # Completely upside-down (>120 degrees tilt) = always crash
+        # This applies to ALL tasks, even at safe zones
+        completely_flipped = abs(euler[0]) > (2 * np.pi / 3) or abs(euler[1]) > (2 * np.pi / 3)
+        if completely_flipped:
+            return True
+
+        # Stuck on ground too long - drone should take off
+        # After 200 steps (~4 seconds), if still on ground, terminate
+        on_ground = position[2] < 0.3
+        if on_ground and self.step_count > 200:
+            return True
+
+        # Out of bounds - expanded for long-range routes
         if self.task == TaskType.DELIVERY_ROUTE:
             # Much larger bounds for long-range delivery
             max_dist = self.route_distance * 1.5

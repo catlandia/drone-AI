@@ -473,14 +473,20 @@ class LearningSequence:
         grade_code = grade.split(" - ")[0]
         date_str = datetime.now().strftime("%d-%m-%Y")
 
-        # Find next version number
+        # Find next global version number (check all existing .pt files)
         version = 1
-        while True:
-            model_filename = f"{grade_code} {date_str} v{version}.pt"
-            model_path = self.save_dir / model_filename
-            if not model_path.exists():
-                break
-            version += 1
+        for existing_file in self.save_dir.parent.glob("**/*.pt"):
+            # Extract version from filename like "P 22-11-2025 v3.pt"
+            name = existing_file.stem  # Remove .pt
+            if " v" in name:
+                try:
+                    v_num = int(name.split(" v")[-1])
+                    version = max(version, v_num + 1)
+                except ValueError:
+                    pass
+
+        model_filename = f"{grade_code} {date_str} v{version}.pt"
+        model_path = self.save_dir / model_filename
 
         best_agent.save(str(model_path))
 

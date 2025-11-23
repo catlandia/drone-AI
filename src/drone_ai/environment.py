@@ -551,9 +551,22 @@ class DroneEnv(gym.Env):
             reward += weights['success']  # +1.0 for perfect hover
 
         # === COLLISION PENALTIES (no death, just penalty) ===
-        # Ground collision penalty
+        # Ground collision penalty (except at safe zones like dropzone/pickup)
         if state.position[2] < 0.05:
-            reward += weights['crash']  # -10.0 for hitting ground
+            # Check if at safe zone (purple dropzone pad or pickup zone)
+            at_safe_zone = False
+            if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
+                # Dropzone is safe - purple pad
+                dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
+                if dist_to_dropzone < 1.0:  # Within 1m of dropzone center
+                    at_safe_zone = True
+                # Pickup zone is also safe
+                dist_to_pickup = np.linalg.norm(state.position[:2] - self.pickup_position[:2])
+                if dist_to_pickup < 1.0:  # Within 1m of pickup center
+                    at_safe_zone = True
+
+            if not at_safe_zone:
+                reward += weights['crash']  # -10.0 for hitting ground outside safe zones
 
         # Obstacle collision penalty
         if self.sim.check_obstacle_collision():

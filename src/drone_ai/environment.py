@@ -107,18 +107,18 @@ class DroneEnv(gym.Env):
         self.sim = DroneSimulation(self.base_config, self.package_config)
 
         # Define action space based on task
+        # Motors can be reversed (negative thrust) for more realistic control
         if task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
-            # 4 motor commands + 1 drop signal
+            # 4 motor commands [-1, 1] + 1 drop signal [0, 1]
             self.action_space = spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(5,),
+                low=np.array([-1.0, -1.0, -1.0, -1.0, 0.0]),
+                high=np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
                 dtype=np.float32
             )
         else:
-            # 4 motor commands normalized to [0, 1]
+            # 4 motor commands [-1, 1] for reversible fans
             self.action_space = spaces.Box(
-                low=0.0,
+                low=-1.0,
                 high=1.0,
                 shape=(4,),
                 dtype=np.float32
@@ -324,12 +324,14 @@ class DroneEnv(gym.Env):
         """Execute one environment step."""
         self.step_count += 1
 
-        # Clip action to valid range
-        action = np.clip(action, 0, 1).astype(np.float32)
-
         # Ensure action is always 5 dimensions for consistent observation space
         if len(action) == 4:
             action = np.concatenate([action, [0.0]])  # Add zero drop signal
+
+        # Clip motor actions to [-1, 1] (reversible fans), drop signal to [0, 1]
+        action = action.astype(np.float32)
+        action[:4] = np.clip(action[:4], -1, 1)  # Motors can reverse
+        action[4] = np.clip(action[4], 0, 1)     # Drop signal stays positive
 
         # Handle delivery task with drop signal
         if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
@@ -567,22 +569,32 @@ class DroneEnv(gym.Env):
             reward += weights['success']  # +1.0 for perfect hover
 
         # === COLLISION PENALTIES (no death, just penalty) ===
-        # Ground collision penalty (except at safe zones like dropzone/pickup)
-        if state.position[2] < 0.05:
-            # Check if at safe zone (purple dropzone pad or pickup zone)
-            at_safe_zone = False
-            if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
-                # Dropzone is safe - purple pad
-                dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
-                if dist_to_dropzone < 1.0:  # Within 1m of dropzone center
-                    at_safe_zone = True
-                # Pickup zone is also safe
-                dist_to_pickup = np.linalg.norm(state.position[:2] - self.pickup_position[:2])
-                if dist_to_pickup < 1.0:  # Within 1m of pickup center
-                    at_safe_zone = True
+        # Platform heights for safe landing zones
+        PLATFORM_HEIGHT = 0.1  # Purple dropzone/pickup platforms are 0.1m tall
 
-            if not at_safe_zone:
-                reward += weights['crash']  # -10.0 for hitting ground outside safe zones
+        # Check if at safe zone (purple dropzone pad or pickup zone)
+        at_safe_zone = False
+        platform_surface_height = 0.0  # Default ground level
+
+        if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
+            # Dropzone is safe - purple pad (0.1m tall)
+            dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
+            if dist_to_dropzone < 1.0:  # Within 1m of dropzone center
+                at_safe_zone = True
+                platform_surface_height = PLATFORM_HEIGHT
+
+            # Pickup zone is also safe (0.1m tall)
+            dist_to_pickup = np.linalg.norm(state.position[:2] - self.pickup_position[:2])
+            if dist_to_pickup < 1.0:  # Within 1m of pickup center
+                at_safe_zone = True
+                platform_surface_height = PLATFORM_HEIGHT
+
+        # Ground collision penalty (adjusted for platform height)
+        # On platforms: surface is at 0.1m, so drone is safe above 0.1m
+        # On ground: surface is at 0.0m, so drone is only safe above 0.05m
+        ground_threshold = platform_surface_height + 0.05  # 5cm above surface
+        if state.position[2] < ground_threshold and not at_safe_zone:
+            reward += weights['crash']  # -10.0 for hitting ground outside safe zones
 
         # Obstacle collision penalty
         if self.sim.check_obstacle_collision():

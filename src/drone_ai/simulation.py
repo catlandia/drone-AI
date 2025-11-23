@@ -310,16 +310,18 @@ class DroneSimulation:
         Advance the simulation by one timestep.
 
         Args:
-            action: Motor speed commands as normalized values [0, 1] for each motor,
-                   or as [thrust, roll, pitch, yaw] commands depending on control mode.
+            action: Motor speed commands as normalized values [-1, 1] for each motor.
+                   Negative values = reverse thrust (fans can spin backwards).
             drop_package: If True and package is attached, release the package.
 
         Returns:
             Updated drone state
         """
-        # Convert normalized action [0, 1] to motor speeds (rad/s)
-        action = np.clip(action, 0, 1)
-        target_speeds = action * (self.config.max_rpm * 2 * np.pi / 60)
+        # Convert normalized action [-1, 1] to motor speeds (rad/s)
+        # Negative action = reverse thrust (negative speed)
+        action = np.clip(action, -1, 1)
+        max_speed = self.config.max_rpm * 2 * np.pi / 60
+        target_speeds = action * max_speed  # Can be negative for reverse
 
         # Motor dynamics (first-order response)
         alpha = self.config.dt / (self.config.motor_time_constant + self.config.dt)
@@ -342,12 +344,15 @@ class DroneSimulation:
         env = self.env_config
 
         # Motor thrusts (with optional noise)
+        # Motors can have negative speed (reverse) producing negative thrust
         motor_speeds = self.state.motor_speeds
         if env.motor_noise > 0:
-            noise = np.random.normal(0, env.motor_noise, 4) * motor_speeds
-            motor_speeds = np.clip(motor_speeds + noise, 0, None)
+            noise = np.random.normal(0, env.motor_noise, 4) * np.abs(motor_speeds)
+            motor_speeds = motor_speeds + noise
 
-        motor_thrusts = self.config.motor_constant * motor_speeds ** 2
+        # Thrust = k * speed * |speed| (preserves sign for reverse thrust)
+        # Positive speed = upward thrust, negative speed = downward thrust
+        motor_thrusts = self.config.motor_constant * motor_speeds * np.abs(motor_speeds)
 
         # Ground effect - thrust increases when close to ground
         if self.state.position[2] < env.ground_effect_height:

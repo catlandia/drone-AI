@@ -96,7 +96,7 @@ class ActorCritic(nn.Module):
             nn.Linear(prev_size, hidden_sizes[-1]),
             act_fn(),
             nn.Linear(hidden_sizes[-1], action_dim),
-            nn.Sigmoid()  # Output in [0, 1] for motor commands
+            nn.Tanh()  # Output in [-1, 1] for reversible motor commands
         )
 
         # Critic head (value function)

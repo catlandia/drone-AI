@@ -317,15 +317,25 @@ class DroneSimulation:
         Returns:
             Updated drone state
         """
+        # Sanitize action first - prevent any NaN/Inf from entering
+        action = np.nan_to_num(action, nan=0.0, posinf=1.0, neginf=-1.0)
+        action = np.clip(action, -1, 1)
+
         # Convert normalized action [-1, 1] to motor speeds (rad/s)
         # Negative action = reverse thrust (negative speed)
-        action = np.clip(action, -1, 1)
         max_speed = self.config.max_rpm * 2 * np.pi / 60
         target_speeds = action * max_speed  # Can be negative for reverse
+
+        # Sanitize motor speeds before dynamics
+        self.state.motor_speeds = np.nan_to_num(self.state.motor_speeds, nan=0.0, posinf=max_speed, neginf=-max_speed)
+        self.state.motor_speeds = np.clip(self.state.motor_speeds, -max_speed, max_speed)
 
         # Motor dynamics (first-order response)
         alpha = self.config.dt / (self.config.motor_time_constant + self.config.dt)
         self.state.motor_speeds = (1 - alpha) * self.state.motor_speeds + alpha * target_speeds
+
+        # Clip motor speeds immediately after update
+        self.state.motor_speeds = np.clip(self.state.motor_speeds, -max_speed, max_speed)
 
         # Compute forces and torques (accounting for package mass if attached)
         forces, torques = self._compute_forces_and_torques()
@@ -541,10 +551,12 @@ class DroneSimulation:
         """Integrate equations of motion using semi-implicit Euler."""
         dt = self.config.dt
 
-        # Physics limits to prevent numerical overflow
-        MAX_VELOCITY = 100.0  # m/s - very generous but prevents overflow
-        MAX_ANGULAR_VELOCITY = 100.0  # rad/s - prevents gyroscopic overflow
+        # Physics limits to prevent numerical overflow (conservative values)
+        MAX_VELOCITY = 50.0  # m/s - realistic for small drone
+        MAX_ANGULAR_VELOCITY = 30.0  # rad/s (~5 rotations/sec) - prevents overflow
         MAX_POSITION = 10000.0  # meters - reasonable world bounds
+        MAX_ACCELERATION = 500.0  # m/s^2 - about 50g, very high but finite
+        ANGULAR_DAMPING = 0.98  # Slight damping to prevent angular velocity buildup
 
         # Helper to sanitize arrays: replace NaN/Inf THEN clip
         def safe_clip(arr, min_val, max_val):
@@ -552,10 +564,10 @@ class DroneSimulation:
             return np.clip(arr, min_val, max_val)
 
         # Sanitize inputs first - forces/torques might be bad
-        forces = safe_clip(forces, -10000.0, 10000.0)
-        torques = safe_clip(torques, -100.0, 100.0)
+        forces = safe_clip(forces, -1000.0, 1000.0)
+        torques = safe_clip(torques, -10.0, 10.0)
 
-        # Sanitize current state in case it's already corrupted
+        # Sanitize current state FIRST before any calculations
         self.state.velocity = safe_clip(self.state.velocity, -MAX_VELOCITY, MAX_VELOCITY)
         self.state.angular_velocity = safe_clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
         self.state.position = safe_clip(self.state.position, -MAX_POSITION, MAX_POSITION)
@@ -567,7 +579,7 @@ class DroneSimulation:
 
         # Linear dynamics (world frame)
         acceleration = forces / total_mass
-        acceleration = safe_clip(acceleration, -1000.0, 1000.0)
+        acceleration = safe_clip(acceleration, -MAX_ACCELERATION, MAX_ACCELERATION)
         self.state.velocity += acceleration * dt
         self.state.velocity = safe_clip(self.state.velocity, -MAX_VELOCITY, MAX_VELOCITY)
         self.state.position += self.state.velocity * dt
@@ -577,16 +589,18 @@ class DroneSimulation:
         I = np.diag([self.config.ixx, self.config.iyy, self.config.izz])
         I_inv = np.diag([1/self.config.ixx, 1/self.config.iyy, 1/self.config.izz])
 
-        # Euler's equation for rigid body rotation
-        omega = safe_clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
+        # Euler's equation for rigid body rotation - use already-clipped angular velocity
+        omega = self.state.angular_velocity  # Already sanitized above
         I_omega = I @ omega
-        I_omega = safe_clip(I_omega, -1000.0, 1000.0)  # Prevent overflow in cross product
+        I_omega = safe_clip(I_omega, -0.01, 0.01)  # I values are ~1e-5, omega ~30, so I_omega ~3e-4
         gyroscopic = np.cross(omega, I_omega)
-        gyroscopic = safe_clip(gyroscopic, -1000.0, 1000.0)
+        gyroscopic = safe_clip(gyroscopic, -0.01, 0.01)
         angular_acceleration = I_inv @ (torques - gyroscopic)
         angular_acceleration = safe_clip(angular_acceleration, -1000.0, 1000.0)
 
         self.state.angular_velocity += angular_acceleration * dt
+        # Apply damping to prevent angular velocity buildup
+        self.state.angular_velocity *= ANGULAR_DAMPING
         self.state.angular_velocity = safe_clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
 
         # Update orientation quaternion

@@ -213,6 +213,11 @@ class RolloutBuffer:
         done: bool
     ):
         """Add a transition to the buffer."""
+        # Don't add if buffer is full - must call reset() or update first
+        if self.ptr >= self.buffer_size:
+            self.full = True
+            return
+
         self.observations[self.ptr] = torch.from_numpy(obs).to(self.device)
         self.actions[self.ptr] = torch.from_numpy(action).to(self.device)
         self.rewards[self.ptr] = reward

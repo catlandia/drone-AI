@@ -538,11 +538,20 @@ class DroneEnv(gym.Env):
             tilt_penalty = min(tilt - 0.3, 1.0) * weights['orientation']
             reward -= tilt_penalty  # Max -0.1
 
-        # Angular velocity penalty (only if spinning fast)
-        ang_vel = np.linalg.norm(state.angular_velocity)
-        if ang_vel > 1.0:
-            ang_penalty = min(ang_vel - 1.0, 2.0) * weights['angular_velocity']
-            reward -= ang_penalty  # Max -0.1
+        # Angular velocity penalty - penalize ANY spinning, especially yaw
+        ang_vel = state.angular_velocity
+        yaw_rate = abs(ang_vel[2])  # Z-axis rotation
+        roll_pitch_rate = np.linalg.norm(ang_vel[:2])  # X and Y axis rotation
+
+        # Penalize yaw rate strongly (drone shouldn't spin on its own)
+        if yaw_rate > 0.1:
+            yaw_penalty = min(yaw_rate, 3.0) * weights['angular_velocity'] * 2
+            reward -= yaw_penalty
+
+        # Penalize roll/pitch rate
+        if roll_pitch_rate > 0.5:
+            rp_penalty = min(roll_pitch_rate - 0.5, 2.0) * weights['angular_velocity']
+            reward -= rp_penalty
 
         # Action smoothness (only penalize large changes)
         motor_action = action[:4]

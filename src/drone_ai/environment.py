@@ -226,6 +226,9 @@ class DroneEnv(gym.Env):
             'obstacle_proximity': -0.5,   # Penalty for being too close to obstacles
             'obstacle_collision': -100.0, # Heavy penalty for hitting obstacles
             'waypoint_reached': 5.0,      # Bonus for reaching waypoints
+
+            # Out of bounds penalty (prevents exploit of flying away)
+            'out_of_bounds': -5.0,        # Heavy per-step penalty for being out of bounds
         }
 
         # Track timing for speed rewards
@@ -551,6 +554,16 @@ class DroneEnv(gym.Env):
         if abs(euler[0]) > tilt_threshold or abs(euler[1]) > tilt_threshold:
             reward += weights['upside_down']  # -2.0 for being upside down
 
+        # Out of bounds penalty (prevents exploit of flying away to lock in rewards)
+        position = state.position
+        if self.task == TaskType.DELIVERY_ROUTE:
+            max_dist = self.route_distance * 1.5
+            if np.any(np.abs(position[:2]) > max_dist) or position[2] > 50 or position[2] < -0.5:
+                reward += weights['out_of_bounds']  # -5.0 per step out of bounds
+        else:
+            if np.any(np.abs(position[:2]) > 10) or position[2] > 20 or position[2] < -0.5:
+                reward += weights['out_of_bounds']  # -5.0 per step out of bounds
+
         # === DELIVERY-SPECIFIC REWARDS ===
         if self.task == TaskType.DELIVERY:
             reward += self._compute_delivery_reward(action)
@@ -790,39 +803,24 @@ class DroneEnv(gym.Env):
         return reward
 
     def _check_terminated(self) -> bool:
-        """Check if episode should terminate."""
-        # Crash detection
+        """Check if episode should terminate.
+
+        Only terminates on ACTUAL crashes (collision with ground/obstacles/extreme velocity),
+        not soft conditions like out-of-bounds or stuck on ground. This prevents
+        the AI from exploiting soft deaths to lock in rewards while doing nothing.
+        """
+        # Only terminate on actual crash (ground collision, obstacle hit, extreme velocity)
         if self.sim.is_crashed():
             return True
 
-        position = self.sim.state.position
-
-        # NOTE: Upside-down no longer causes termination - just penalty in reward function
-        # This allows drones to learn to recover from bad orientations
-
-        # Stuck on ground too long - drone should take off
-        # After 200 steps (~4 seconds), if still on ground, terminate
-        on_ground = position[2] < 0.3
-        if on_ground and self.step_count > 200:
-            return True
-
-        # Out of bounds - expanded for long-range routes
-        if self.task == TaskType.DELIVERY_ROUTE:
-            # Much larger bounds for long-range delivery
-            max_dist = self.route_distance * 1.5
-            if np.any(np.abs(position[:2]) > max_dist) or position[2] > 50:
-                return True
-        else:
-            if np.any(np.abs(position[:2]) > 10) or position[2] > 20:
-                return True
-
-        # Delivery task termination
+        # Delivery task - terminate when package is delivered or missed (legitimate end)
         if self.task == TaskType.DELIVERY:
             if self.sim.is_package_delivered() or self.sim.is_package_missed():
                 return True
 
-        # Delivery route doesn't terminate on single delivery - it continues
-        # Terminate only on crash, out of bounds, or max steps
+        # NOTE: Out-of-bounds and stuck-on-ground no longer terminate.
+        # These conditions get penalties in _compute_reward() instead,
+        # so the drone is punished but can't exploit dying to lock in rewards.
 
         return False
 

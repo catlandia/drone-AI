@@ -107,18 +107,18 @@ class DroneEnv(gym.Env):
         self.sim = DroneSimulation(self.base_config, self.package_config)
 
         # Define action space based on task
+        # Motors can be reversed (negative thrust) for more realistic control
         if task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
-            # 4 motor commands + 1 drop signal
+            # 4 motor commands [-1, 1] + 1 drop signal [0, 1]
             self.action_space = spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(5,),
+                low=np.array([-1.0, -1.0, -1.0, -1.0, 0.0]),
+                high=np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
                 dtype=np.float32
             )
         else:
-            # 4 motor commands normalized to [0, 1]
+            # 4 motor commands [-1, 1] for reversible fans
             self.action_space = spaces.Box(
-                low=0.0,
+                low=-1.0,
                 high=1.0,
                 shape=(4,),
                 dtype=np.float32
@@ -324,12 +324,14 @@ class DroneEnv(gym.Env):
         """Execute one environment step."""
         self.step_count += 1
 
-        # Clip action to valid range
-        action = np.clip(action, 0, 1).astype(np.float32)
-
         # Ensure action is always 5 dimensions for consistent observation space
         if len(action) == 4:
             action = np.concatenate([action, [0.0]])  # Add zero drop signal
+
+        # Clip motor actions to [-1, 1] (reversible fans), drop signal to [0, 1]
+        action = action.astype(np.float32)
+        action[:4] = np.clip(action[:4], -1, 1)  # Motors can reverse
+        action[4] = np.clip(action[4], 0, 1)     # Drop signal stays positive
 
         # Handle delivery task with drop signal
         if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
@@ -374,23 +376,29 @@ class DroneEnv(gym.Env):
         """
         state = self.sim.state
 
+        # Helper to sanitize values: replace NaN/Inf and clip to safe range
+        def sanitize(arr, max_val=10.0):
+            arr = np.asarray(arr, dtype=np.float64)  # Use float64 first to avoid overflow
+            arr = np.nan_to_num(arr, nan=0.0, posinf=max_val, neginf=-max_val)
+            return np.clip(arr, -max_val, max_val)
+
         # Position (normalized by typical operating range)
-        position = state.position / 5.0  # Normalize to ~[-1, 1] for 5m range
+        position = sanitize(state.position / 5.0)  # Normalize to ~[-1, 1] for 5m range
 
         # Velocity (normalized)
-        velocity = state.velocity / 5.0  # Normalize to ~[-1, 1] for 5m/s
+        velocity = sanitize(state.velocity / 5.0)  # Normalize to ~[-1, 1] for 5m/s
 
-        # Orientation (Euler angles)
-        euler = state.get_euler_angles()
+        # Orientation (Euler angles) - can overflow if quaternion is bad
+        euler = sanitize(state.get_euler_angles())
 
         # Angular velocity (normalized)
-        angular_velocity = state.angular_velocity / 10.0  # Normalize
+        angular_velocity = sanitize(state.angular_velocity / 10.0)
 
         # Relative target position
-        target_rel = (self.target_position - state.position) / 5.0
+        target_rel = sanitize((self.target_position - state.position) / 5.0)
 
         # Previous action (always 5 dims)
-        prev_action = self.prev_action
+        prev_action = sanitize(self.prev_action)
 
         # Base observation (20 dims)
         base_obs = [
@@ -425,8 +433,8 @@ class DroneEnv(gym.Env):
                 }
                 pkg_status = np.array([status_map.get(pkg.status, 0.0)])
                 has_package = np.array([1.0 if self.sim.has_package() else 0.0])
-                location1_rel = (pkg.pickup_position - state.position) / 5.0
-                location2_rel = (pkg.dropzone_position - state.position) / 5.0
+                location1_rel = sanitize((pkg.pickup_position - state.position) / 5.0)
+                location2_rel = sanitize((pkg.dropzone_position - state.position) / 5.0)
 
         elif self.task == TaskType.DELIVERY_ROUTE:
             pkg = self.sim.get_package_state()
@@ -442,8 +450,8 @@ class DroneEnv(gym.Env):
                 has_package = np.array([1.0 if self.sim.has_package() else 0.0])
 
             # Relative positions to base and dropzone (normalized for longer distances)
-            location1_rel = (self.base_position - state.position) / self.route_distance
-            location2_rel = (self.dropzone_position - state.position) / self.route_distance
+            location1_rel = sanitize((self.base_position - state.position) / self.route_distance)
+            location2_rel = sanitize((self.dropzone_position - state.position) / self.route_distance)
 
             # Number of deliveries completed (normalized)
             deliveries_norm = np.array([self.deliveries_completed / 10.0])
@@ -567,22 +575,37 @@ class DroneEnv(gym.Env):
             reward += weights['success']  # +1.0 for perfect hover
 
         # === COLLISION PENALTIES (no death, just penalty) ===
-        # Ground collision penalty (except at safe zones like dropzone/pickup)
-        if state.position[2] < 0.05:
-            # Check if at safe zone (purple dropzone pad or pickup zone)
-            at_safe_zone = False
-            if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
-                # Dropzone is safe - purple pad
-                dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
-                if dist_to_dropzone < 1.0:  # Within 1m of dropzone center
-                    at_safe_zone = True
-                # Pickup zone is also safe
-                dist_to_pickup = np.linalg.norm(state.position[:2] - self.pickup_position[:2])
-                if dist_to_pickup < 1.0:  # Within 1m of pickup center
-                    at_safe_zone = True
+        # Platform heights for safe landing zones
+        PLATFORM_HEIGHT = 0.1  # Purple dropzone/pickup platforms are 0.1m tall
 
-            if not at_safe_zone:
-                reward += weights['crash']  # -10.0 for hitting ground outside safe zones
+        # Check if at safe zone (purple dropzone pad or pickup zone)
+        at_safe_zone = False
+        platform_surface_height = 0.0  # Default ground level
+
+        if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
+            # Dropzone is safe - purple pad (0.1m tall)
+            dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
+            if dist_to_dropzone < 1.0:  # Within 1m of dropzone center
+                at_safe_zone = True
+                platform_surface_height = PLATFORM_HEIGHT
+
+            # Pickup/base zone is also safe (0.1m tall)
+            # For DELIVERY_ROUTE, use base_position; for DELIVERY, use pickup_position
+            if self.task == TaskType.DELIVERY_ROUTE:
+                safe_zone_pos = self.base_position[:2]
+            else:
+                safe_zone_pos = self.pickup_position[:2]
+            dist_to_safe = np.linalg.norm(state.position[:2] - safe_zone_pos)
+            if dist_to_safe < 1.0:  # Within 1m of pickup/base center
+                at_safe_zone = True
+                platform_surface_height = PLATFORM_HEIGHT
+
+        # Ground collision penalty (adjusted for platform height)
+        # On platforms: surface is at 0.1m, so drone is safe above 0.1m
+        # On ground: surface is at 0.0m, so drone is only safe above 0.05m
+        ground_threshold = platform_surface_height + 0.05  # 5cm above surface
+        if state.position[2] < ground_threshold and not at_safe_zone:
+            reward += weights['crash']  # -10.0 for hitting ground outside safe zones
 
         # Obstacle collision penalty
         if self.sim.check_obstacle_collision():
@@ -742,8 +765,10 @@ class DroneEnv(gym.Env):
         if self.route_phase == "outbound" and pkg is not None:
             dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
             # Delta-based reward: reward for reducing distance since last step
-            if hasattr(self, '_prev_dist_to_dropzone'):
-                distance_reduced = self._prev_dist_to_dropzone - dist_to_dropzone
+            # Use getattr to safely handle case where attribute doesn't exist
+            prev_dist = getattr(self, '_prev_dist_to_dropzone', None)
+            if prev_dist is not None:
+                distance_reduced = prev_dist - dist_to_dropzone
                 if distance_reduced > 0:
                     reward += weights['route_progress'] * distance_reduced * 10  # Scale up small deltas
             self._prev_dist_to_dropzone = dist_to_dropzone
@@ -751,8 +776,9 @@ class DroneEnv(gym.Env):
         elif self.route_phase == "return":
             dist_to_base = np.linalg.norm(state.position[:2] - self.base_position[:2])
             # Delta-based reward: reward for reducing distance since last step
-            if hasattr(self, '_prev_dist_to_base'):
-                distance_reduced = self._prev_dist_to_base - dist_to_base
+            prev_dist = getattr(self, '_prev_dist_to_base', None)
+            if prev_dist is not None:
+                distance_reduced = prev_dist - dist_to_base
                 if distance_reduced > 0:
                     reward += weights['route_progress'] * distance_reduced * 10
             self._prev_dist_to_base = dist_to_base
@@ -832,6 +858,8 @@ class DroneEnv(gym.Env):
                 # Update target to base for return trip
                 self.target_position = self.base_position.copy()
                 self.target_position[2] = 1.0  # Fly at 1m altitude
+                # Reset progress tracking for return trip
+                self._prev_dist_to_base = None
 
         # === RELOAD AT BASE ===
         if self.route_phase == "return":
@@ -856,6 +884,8 @@ class DroneEnv(gym.Env):
             self.route_phase = "outbound"
             self.target_position = self.dropzone_position.copy()
             self.target_position[2] = 1.5  # Higher altitude for dropping
+            # Reset progress tracking for new outbound trip
+            self._prev_dist_to_dropzone = None
 
         return reward
 

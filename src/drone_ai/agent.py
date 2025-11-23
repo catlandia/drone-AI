@@ -96,7 +96,7 @@ class ActorCritic(nn.Module):
             nn.Linear(prev_size, hidden_sizes[-1]),
             act_fn(),
             nn.Linear(hidden_sizes[-1], action_dim),
-            nn.Sigmoid()  # Output in [0, 1] for motor commands
+            nn.Tanh()  # Output in [-1, 1] for reversible motor commands
         )
 
         # Critic head (value function)
@@ -156,8 +156,8 @@ class ActorCritic(nn.Module):
             action = dist.sample()
             log_prob = dist.log_prob(action).sum(dim=-1)
 
-        # Clip action to valid range
-        action = torch.clamp(action, 0, 1)
+        # Clip action to valid range (reversible motors use [-1, 1])
+        action = torch.clamp(action, -1, 1)
 
         return action, log_prob, value.squeeze(-1)
 
@@ -342,9 +342,21 @@ class PPOAgent:
         deterministic: bool = False
     ) -> Tuple[np.ndarray, Dict[str, float]]:
         """Select action given observation."""
+        # Sanitize observation: replace NaN/Inf with zeros and clip to safe range
+        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
+        obs = np.clip(obs, -10.0, 10.0).astype(np.float32)
+
         with torch.no_grad():
             obs_tensor = torch.from_numpy(obs).float().unsqueeze(0).to(self.device)
             action, log_prob, value = self.policy.get_action(obs_tensor, deterministic)
+
+            # Check for NaN in action and use safe default if needed
+            if torch.isnan(action).any():
+                # Return hover-like action (slightly positive thrust on all motors)
+                action = torch.zeros_like(action)
+                action[:, :4] = 0.3  # Hover thrust
+                log_prob = torch.zeros(1, device=self.device)
+                value = torch.zeros(1, device=self.device)
 
         return (
             action.cpu().numpy().squeeze(0),

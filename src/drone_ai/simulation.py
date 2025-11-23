@@ -310,16 +310,18 @@ class DroneSimulation:
         Advance the simulation by one timestep.
 
         Args:
-            action: Motor speed commands as normalized values [0, 1] for each motor,
-                   or as [thrust, roll, pitch, yaw] commands depending on control mode.
+            action: Motor speed commands as normalized values [-1, 1] for each motor.
+                   Negative values = reverse thrust (fans can spin backwards).
             drop_package: If True and package is attached, release the package.
 
         Returns:
             Updated drone state
         """
-        # Convert normalized action [0, 1] to motor speeds (rad/s)
-        action = np.clip(action, 0, 1)
-        target_speeds = action * (self.config.max_rpm * 2 * np.pi / 60)
+        # Convert normalized action [-1, 1] to motor speeds (rad/s)
+        # Negative action = reverse thrust (negative speed)
+        action = np.clip(action, -1, 1)
+        max_speed = self.config.max_rpm * 2 * np.pi / 60
+        target_speeds = action * max_speed  # Can be negative for reverse
 
         # Motor dynamics (first-order response)
         alpha = self.config.dt / (self.config.motor_time_constant + self.config.dt)
@@ -341,37 +343,54 @@ class DroneSimulation:
         """Compute total forces and torques on the drone."""
         env = self.env_config
 
-        # Motor thrusts (with optional noise)
-        motor_speeds = self.state.motor_speeds
-        if env.motor_noise > 0:
-            noise = np.random.normal(0, env.motor_noise, 4) * motor_speeds
-            motor_speeds = np.clip(motor_speeds + noise, 0, None)
+        # Helper to sanitize values
+        def safe_val(arr, max_val=10000.0):
+            arr = np.nan_to_num(arr, nan=0.0, posinf=max_val, neginf=-max_val)
+            return np.clip(arr, -max_val, max_val)
 
-        motor_thrusts = self.config.motor_constant * motor_speeds ** 2
+        # Motor thrusts (with optional noise)
+        # Motors can have negative speed (reverse) producing negative thrust
+        motor_speeds = safe_val(self.state.motor_speeds, 5000.0)
+        if env.motor_noise > 0:
+            noise = np.random.normal(0, env.motor_noise, 4) * np.abs(motor_speeds)
+            motor_speeds = motor_speeds + noise
+        motor_speeds = safe_val(motor_speeds, 5000.0)
+
+        # Thrust = k * speed * |speed| (preserves sign for reverse thrust)
+        # Positive speed = upward thrust, negative speed = downward thrust
+        motor_thrusts = self.config.motor_constant * motor_speeds * np.abs(motor_speeds)
+        motor_thrusts = safe_val(motor_thrusts, 100.0)  # Reasonable thrust limit
 
         # Ground effect - thrust increases when close to ground
-        if self.state.position[2] < env.ground_effect_height:
+        if self.state.position[2] < env.ground_effect_height and self.state.position[2] > 0:
             ground_factor = 1.0 + env.ground_effect_strength * (
                 1.0 - self.state.position[2] / env.ground_effect_height
             )
             motor_thrusts *= ground_factor
+            motor_thrusts = safe_val(motor_thrusts, 100.0)
 
         # Battery voltage drop effect (reduces thrust under load)
         if env.battery_voltage_drop > 0:
-            load_factor = np.mean(motor_speeds) / (self.config.max_rpm * 2 * np.pi / 60)
-            voltage_factor = 1.0 - env.battery_voltage_drop * load_factor
-            motor_thrusts *= voltage_factor
+            max_speed = self.config.max_rpm * 2 * np.pi / 60
+            if max_speed > 0:
+                load_factor = np.clip(np.mean(np.abs(motor_speeds)) / max_speed, 0, 1)
+                voltage_factor = 1.0 - env.battery_voltage_drop * load_factor
+                motor_thrusts *= voltage_factor
 
         # Total thrust and torques from motors (body frame)
         wrench = self.allocation_matrix @ motor_thrusts
+        wrench = safe_val(wrench, 1000.0)
         thrust_body = np.array([0, 0, wrench[0]])
         torques_body = wrench[1:4]
 
         # Rotation matrix (body to world)
         R = self.state.get_rotation_matrix()
+        # Sanitize rotation matrix in case quaternion was bad
+        R = np.nan_to_num(R, nan=0.0, posinf=1.0, neginf=-1.0)
 
         # Transform thrust to world frame
         thrust_world = R @ thrust_body
+        thrust_world = safe_val(thrust_world, 1000.0)
 
         # Calculate total mass (drone + package if attached)
         total_mass = self.config.mass
@@ -522,6 +541,25 @@ class DroneSimulation:
         """Integrate equations of motion using semi-implicit Euler."""
         dt = self.config.dt
 
+        # Physics limits to prevent numerical overflow
+        MAX_VELOCITY = 100.0  # m/s - very generous but prevents overflow
+        MAX_ANGULAR_VELOCITY = 100.0  # rad/s - prevents gyroscopic overflow
+        MAX_POSITION = 10000.0  # meters - reasonable world bounds
+
+        # Helper to sanitize arrays: replace NaN/Inf THEN clip
+        def safe_clip(arr, min_val, max_val):
+            arr = np.nan_to_num(arr, nan=0.0, posinf=max_val, neginf=min_val)
+            return np.clip(arr, min_val, max_val)
+
+        # Sanitize inputs first - forces/torques might be bad
+        forces = safe_clip(forces, -10000.0, 10000.0)
+        torques = safe_clip(torques, -100.0, 100.0)
+
+        # Sanitize current state in case it's already corrupted
+        self.state.velocity = safe_clip(self.state.velocity, -MAX_VELOCITY, MAX_VELOCITY)
+        self.state.angular_velocity = safe_clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
+        self.state.position = safe_clip(self.state.position, -MAX_POSITION, MAX_POSITION)
+
         # Calculate total mass (drone + package if attached)
         total_mass = self.config.mass
         if self.package is not None and self.package.status == PackageStatus.ATTACHED:
@@ -529,26 +567,51 @@ class DroneSimulation:
 
         # Linear dynamics (world frame)
         acceleration = forces / total_mass
+        acceleration = safe_clip(acceleration, -1000.0, 1000.0)
         self.state.velocity += acceleration * dt
+        self.state.velocity = safe_clip(self.state.velocity, -MAX_VELOCITY, MAX_VELOCITY)
         self.state.position += self.state.velocity * dt
+        self.state.position = safe_clip(self.state.position, -MAX_POSITION, MAX_POSITION)
 
         # Angular dynamics (body frame)
         I = np.diag([self.config.ixx, self.config.iyy, self.config.izz])
         I_inv = np.diag([1/self.config.ixx, 1/self.config.iyy, 1/self.config.izz])
 
         # Euler's equation for rigid body rotation
-        omega = self.state.angular_velocity
-        gyroscopic = np.cross(omega, I @ omega)
+        omega = safe_clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
+        I_omega = I @ omega
+        I_omega = safe_clip(I_omega, -1000.0, 1000.0)  # Prevent overflow in cross product
+        gyroscopic = np.cross(omega, I_omega)
+        gyroscopic = safe_clip(gyroscopic, -1000.0, 1000.0)
         angular_acceleration = I_inv @ (torques - gyroscopic)
+        angular_acceleration = safe_clip(angular_acceleration, -1000.0, 1000.0)
 
         self.state.angular_velocity += angular_acceleration * dt
+        self.state.angular_velocity = safe_clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
 
         # Update orientation quaternion
         omega_quat = np.array([0, *self.state.angular_velocity])
         q = self.state.orientation
+        # Sanitize quaternion before multiplication
+        q = np.nan_to_num(q, nan=0.0, posinf=1.0, neginf=-1.0)
+        q_norm = np.linalg.norm(q)
+        if q_norm < 1e-10:
+            q = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            q = q / q_norm
+        self.state.orientation = q
+
         q_dot = 0.5 * quaternion_multiply(q, omega_quat)
-        self.state.orientation += q_dot * dt
-        self.state.orientation /= np.linalg.norm(self.state.orientation)
+        q_dot = np.nan_to_num(q_dot, nan=0.0, posinf=0.0, neginf=0.0)
+        self.state.orientation = self.state.orientation + q_dot * dt
+
+        # Normalize quaternion and check for NaN
+        q_norm = np.linalg.norm(self.state.orientation)
+        if q_norm < 1e-10 or not np.isfinite(q_norm):
+            # Reset to identity quaternion if invalid
+            self.state.orientation = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            self.state.orientation = self.state.orientation / q_norm
 
         # Ground collision
         if self.state.position[2] < 0:

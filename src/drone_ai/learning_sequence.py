@@ -102,11 +102,22 @@ class LearningSequence:
         self.population: List[PPOAgent] = []
         self._init_population()
 
-        # Visualization
+        # Visualization (optional - training works without it)
         self.renderer = None
         if args.render:
-            from drone_ai.visualization import DroneRenderer
-            self.renderer = DroneRenderer(width=1024, height=768)
+            try:
+                # Set SDL to allow running without display when locked
+                import os
+                os.environ.setdefault('SDL_VIDEODRIVER', 'windib')  # Windows fallback
+                os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')   # No audio needed
+
+                from drone_ai.visualization import DroneRenderer
+                self.renderer = DroneRenderer(width=1024, height=768)
+                print("  Visualization enabled (close window to run in background)")
+            except Exception as e:
+                print(f"  [Could not initialize renderer: {e}]")
+                print("  [Training will continue without visualization]")
+                self.renderer = None
 
         # Tracking
         self.stage_scores = []
@@ -281,38 +292,45 @@ class LearningSequence:
 
                 pbar.update(1)
 
-                # Render
+                # Render (optional - training continues even if window is closed)
                 if self.renderer and step % self.args.render_freq == 0:
-                    if not self.renderer.process_events():
-                        pbar.close()
-                        return total_rewards
+                    try:
+                        # Check if window was closed - if so, disable renderer but continue training
+                        if not self.renderer.process_events():
+                            print("\n    [Window closed - continuing training in background]")
+                            self.renderer = None  # Disable renderer, keep training
+                            continue
 
-                    state = envs[0].sim.state
-                    target = envs[0].target_position
-                    additional_states = [envs[i].sim.state for i in range(1, self.population_size)]
+                        state = envs[0].sim.state
+                        target = envs[0].target_position
+                        additional_states = [envs[i].sim.state for i in range(1, self.population_size)]
 
-                    # Get package for delivery visualization
-                    package = envs[0].sim.package if hasattr(envs[0].sim, 'package') else None
+                        # Get package for delivery visualization
+                        package = envs[0].sim.package if hasattr(envs[0].sim, 'package') else None
 
-                    # Calculate mean reward across all drones
-                    mean_reward = sum(drone_rewards) / max(1, len(drone_rewards))
+                        # Calculate mean reward across all drones
+                        mean_reward = sum(drone_rewards) / max(1, len(drone_rewards))
 
-                    self.renderer.render(
-                        state=state,
-                        target=target,
-                        trajectory=envs[0].position_history,
-                        package=package,
-                        dropzone_radius=0.3,
-                        training_metrics={
-                            'stage': stage_name,
-                            'age': age + 1,
-                            'alive': alive_count,
-                            'episodes': age + 1,
-                            'episode_reward': drone_rewards[0],
-                            'mean_reward': mean_reward
-                        },
-                        additional_states=additional_states
-                    )
+                        self.renderer.render(
+                            state=state,
+                            target=target,
+                            trajectory=envs[0].position_history,
+                            package=package,
+                            dropzone_radius=0.3,
+                            training_metrics={
+                                'stage': stage_name,
+                                'age': age + 1,
+                                'alive': alive_count,
+                                'episodes': age + 1,
+                                'episode_reward': drone_rewards[0],
+                                'mean_reward': mean_reward
+                            },
+                            additional_states=additional_states
+                        )
+                    except Exception as e:
+                        # Display error (locked screen, etc.) - continue training without rendering
+                        print(f"\n    [Render error: {e} - continuing in background]")
+                        self.renderer = None
 
             pbar.close()
 

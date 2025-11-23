@@ -342,9 +342,21 @@ class PPOAgent:
         deterministic: bool = False
     ) -> Tuple[np.ndarray, Dict[str, float]]:
         """Select action given observation."""
+        # Sanitize observation: replace NaN/Inf with zeros and clip to safe range
+        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
+        obs = np.clip(obs, -10.0, 10.0).astype(np.float32)
+
         with torch.no_grad():
             obs_tensor = torch.from_numpy(obs).float().unsqueeze(0).to(self.device)
             action, log_prob, value = self.policy.get_action(obs_tensor, deterministic)
+
+            # Check for NaN in action and use safe default if needed
+            if torch.isnan(action).any():
+                # Return hover-like action (slightly positive thrust on all motors)
+                action = torch.zeros_like(action)
+                action[:, :4] = 0.3  # Hover thrust
+                log_prob = torch.zeros(1, device=self.device)
+                value = torch.zeros(1, device=self.device)
 
         return (
             action.cpu().numpy().squeeze(0),

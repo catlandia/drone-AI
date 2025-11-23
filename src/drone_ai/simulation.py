@@ -527,6 +527,11 @@ class DroneSimulation:
         """Integrate equations of motion using semi-implicit Euler."""
         dt = self.config.dt
 
+        # Physics limits to prevent numerical overflow
+        MAX_VELOCITY = 100.0  # m/s - very generous but prevents overflow
+        MAX_ANGULAR_VELOCITY = 100.0  # rad/s - prevents gyroscopic overflow
+        MAX_POSITION = 10000.0  # meters - reasonable world bounds
+
         # Calculate total mass (drone + package if attached)
         total_mass = self.config.mass
         if self.package is not None and self.package.status == PackageStatus.ATTACHED:
@@ -534,8 +539,14 @@ class DroneSimulation:
 
         # Linear dynamics (world frame)
         acceleration = forces / total_mass
+        # Clip acceleration to prevent extreme values
+        acceleration = np.clip(acceleration, -1000.0, 1000.0)
         self.state.velocity += acceleration * dt
+        # Clip velocity to prevent overflow
+        self.state.velocity = np.clip(self.state.velocity, -MAX_VELOCITY, MAX_VELOCITY)
         self.state.position += self.state.velocity * dt
+        # Clip position to world bounds
+        self.state.position = np.clip(self.state.position, -MAX_POSITION, MAX_POSITION)
 
         # Angular dynamics (body frame)
         I = np.diag([self.config.ixx, self.config.iyy, self.config.izz])
@@ -543,17 +554,38 @@ class DroneSimulation:
 
         # Euler's equation for rigid body rotation
         omega = self.state.angular_velocity
+        # Clip omega before cross product to prevent overflow
+        omega = np.clip(omega, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
         gyroscopic = np.cross(omega, I @ omega)
         angular_acceleration = I_inv @ (torques - gyroscopic)
+        # Clip angular acceleration
+        angular_acceleration = np.clip(angular_acceleration, -1000.0, 1000.0)
 
         self.state.angular_velocity += angular_acceleration * dt
+        # Clip angular velocity
+        self.state.angular_velocity = np.clip(self.state.angular_velocity, -MAX_ANGULAR_VELOCITY, MAX_ANGULAR_VELOCITY)
 
         # Update orientation quaternion
         omega_quat = np.array([0, *self.state.angular_velocity])
         q = self.state.orientation
         q_dot = 0.5 * quaternion_multiply(q, omega_quat)
         self.state.orientation += q_dot * dt
-        self.state.orientation /= np.linalg.norm(self.state.orientation)
+
+        # Normalize quaternion and check for NaN
+        q_norm = np.linalg.norm(self.state.orientation)
+        if q_norm < 1e-10 or not np.isfinite(q_norm):
+            # Reset to identity quaternion if invalid
+            self.state.orientation = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            self.state.orientation /= q_norm
+
+        # Check for NaN in state and reset if needed
+        if not np.all(np.isfinite(self.state.velocity)):
+            self.state.velocity = np.zeros(3)
+        if not np.all(np.isfinite(self.state.angular_velocity)):
+            self.state.angular_velocity = np.zeros(3)
+        if not np.all(np.isfinite(self.state.position)):
+            self.state.position = np.array([0.0, 0.0, 1.0])
 
         # Ground collision
         if self.state.position[2] < 0:

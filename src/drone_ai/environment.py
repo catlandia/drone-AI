@@ -376,23 +376,29 @@ class DroneEnv(gym.Env):
         """
         state = self.sim.state
 
+        # Helper to sanitize values: replace NaN/Inf and clip to safe range
+        def sanitize(arr, max_val=10.0):
+            arr = np.asarray(arr, dtype=np.float64)  # Use float64 first to avoid overflow
+            arr = np.nan_to_num(arr, nan=0.0, posinf=max_val, neginf=-max_val)
+            return np.clip(arr, -max_val, max_val)
+
         # Position (normalized by typical operating range)
-        position = state.position / 5.0  # Normalize to ~[-1, 1] for 5m range
+        position = sanitize(state.position / 5.0)  # Normalize to ~[-1, 1] for 5m range
 
         # Velocity (normalized)
-        velocity = state.velocity / 5.0  # Normalize to ~[-1, 1] for 5m/s
+        velocity = sanitize(state.velocity / 5.0)  # Normalize to ~[-1, 1] for 5m/s
 
-        # Orientation (Euler angles)
-        euler = state.get_euler_angles()
+        # Orientation (Euler angles) - can overflow if quaternion is bad
+        euler = sanitize(state.get_euler_angles())
 
         # Angular velocity (normalized)
-        angular_velocity = state.angular_velocity / 10.0  # Normalize
+        angular_velocity = sanitize(state.angular_velocity / 10.0)
 
         # Relative target position
-        target_rel = (self.target_position - state.position) / 5.0
+        target_rel = sanitize((self.target_position - state.position) / 5.0)
 
         # Previous action (always 5 dims)
-        prev_action = self.prev_action
+        prev_action = sanitize(self.prev_action)
 
         # Base observation (20 dims)
         base_obs = [
@@ -427,8 +433,8 @@ class DroneEnv(gym.Env):
                 }
                 pkg_status = np.array([status_map.get(pkg.status, 0.0)])
                 has_package = np.array([1.0 if self.sim.has_package() else 0.0])
-                location1_rel = (pkg.pickup_position - state.position) / 5.0
-                location2_rel = (pkg.dropzone_position - state.position) / 5.0
+                location1_rel = sanitize((pkg.pickup_position - state.position) / 5.0)
+                location2_rel = sanitize((pkg.dropzone_position - state.position) / 5.0)
 
         elif self.task == TaskType.DELIVERY_ROUTE:
             pkg = self.sim.get_package_state()
@@ -444,8 +450,8 @@ class DroneEnv(gym.Env):
                 has_package = np.array([1.0 if self.sim.has_package() else 0.0])
 
             # Relative positions to base and dropzone (normalized for longer distances)
-            location1_rel = (self.base_position - state.position) / self.route_distance
-            location2_rel = (self.dropzone_position - state.position) / self.route_distance
+            location1_rel = sanitize((self.base_position - state.position) / self.route_distance)
+            location2_rel = sanitize((self.dropzone_position - state.position) / self.route_distance)
 
             # Number of deliveries completed (normalized)
             deliveries_norm = np.array([self.deliveries_completed / 10.0])

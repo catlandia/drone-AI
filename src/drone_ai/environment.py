@@ -193,6 +193,8 @@ class DroneEnv(gym.Env):
             # === TERMINAL PENALTIES ===
             'crash': -10.0,               # Crash penalty (reduced from -50)
             'upside_down': -2.0,          # Upside down penalty (reduced from -15)
+            'extreme_velocity': -3.0,     # Penalty for going too fast (>20 m/s)
+            'extreme_spin': -3.0,         # Penalty for spinning too fast (>50 rad/s)
             'success': 1.0,               # Extra bonus for perfect hover
 
             # === DELIVERY TASK REWARDS ===
@@ -553,6 +555,16 @@ class DroneEnv(gym.Env):
         tilt_threshold = np.pi / 3  # 60 degrees
         if abs(euler[0]) > tilt_threshold or abs(euler[1]) > tilt_threshold:
             reward += weights['upside_down']  # -2.0 for being upside down
+
+        # Extreme velocity penalty (prevents exploit - penalize but don't terminate)
+        speed = np.linalg.norm(state.velocity)
+        if speed > 20.0:  # Going faster than 20 m/s
+            reward += weights['extreme_velocity']  # -3.0 per step
+
+        # Extreme spin penalty (prevents exploit - penalize but don't terminate)
+        spin = np.linalg.norm(state.angular_velocity)
+        if spin > 50.0:  # Spinning faster than 50 rad/s
+            reward += weights['extreme_spin']  # -3.0 per step
 
         # Out of bounds penalty (prevents exploit of flying away to lock in rewards)
         position = state.position

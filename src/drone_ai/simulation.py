@@ -560,44 +560,28 @@ class DroneSimulation:
         return self.state.copy()
 
     def is_crashed(self) -> bool:
-        """Check if the drone has crashed or is in an unrecoverable state."""
-        # Check if on ground with significant tilt
-        euler = self.state.get_euler_angles()
-        on_ground = self.state.position[2] < 0.05
-        # More lenient tilt threshold - 60 degrees instead of 45
-        # This allows for more aggressive maneuvers during pickup/landing
-        severely_tilted = abs(euler[0]) > np.pi/3 or abs(euler[1]) > np.pi/3
+        """Check if the drone has crashed into something.
 
-        # Check if at a safe landing zone (pickup/base zone)
-        at_safe_zone = False
-        if self.package is not None:
-            # Check if near pickup zone
-            dist_to_pickup = np.linalg.norm(
-                self.state.position[:2] - self.package.pickup_position[:2]
-            )
-            at_safe_zone = dist_to_pickup < self.package_config.pickup_radius * 2.0
-
-            # Also check near dropzone
-            dist_to_dropzone = np.linalg.norm(
-                self.state.position[:2] - self.package.dropzone_position[:2]
-            )
-            if dist_to_dropzone < self.package_config.drop_zone_radius * 2.0:
-                at_safe_zone = True
-
-        # Check for extreme velocities - relaxed thresholds for learning
-        # 50 m/s = 180 km/h - very fast but allows aggressive learning
-        high_velocity = np.linalg.norm(self.state.velocity) > 50
-        # 100 rad/s = ~16 rotations/sec - allows spinning during learning
-        high_angular = np.linalg.norm(self.state.angular_velocity) > 100
-
-        # Check obstacle collision
+        Only returns True for ACTUAL collisions, not self-induced states.
+        This prevents AI from exploiting self-termination to lock in rewards.
+        """
+        # Check obstacle collision - actual external collision
         obstacle_hit = self._obstacle_collision or self.check_obstacle_collision()
+        if obstacle_hit:
+            return True
 
-        # Landing at safe zone (pickup/base) is OK even with some tilt
-        # Only crash if severely tilted AND not at safe zone
-        ground_crash = on_ground and severely_tilted and not at_safe_zone
+        # Check ground collision - must have significant DOWNWARD velocity
+        # This prevents exploit of just tilting on ground to die
+        on_ground = self.state.position[2] < 0.05
+        downward_velocity = self.state.velocity[2] < -2.0  # Falling at >2 m/s
 
-        return ground_crash or high_velocity or high_angular or obstacle_hit
+        if on_ground and downward_velocity:
+            return True  # Actual impact with ground
+
+        # High velocity and spin are now just penalized in reward, not terminal
+        # This prevents AI from deliberately spinning/speeding to die
+
+        return False
 
     def check_obstacle_collision(self) -> bool:
         """Check if drone collides with any obstacle."""

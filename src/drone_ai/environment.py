@@ -583,9 +583,14 @@ class DroneEnv(gym.Env):
                 at_safe_zone = True
                 platform_surface_height = PLATFORM_HEIGHT
 
-            # Pickup zone is also safe (0.1m tall)
-            dist_to_pickup = np.linalg.norm(state.position[:2] - self.pickup_position[:2])
-            if dist_to_pickup < 1.0:  # Within 1m of pickup center
+            # Pickup/base zone is also safe (0.1m tall)
+            # For DELIVERY_ROUTE, use base_position; for DELIVERY, use pickup_position
+            if self.task == TaskType.DELIVERY_ROUTE:
+                safe_zone_pos = self.base_position[:2]
+            else:
+                safe_zone_pos = self.pickup_position[:2]
+            dist_to_safe = np.linalg.norm(state.position[:2] - safe_zone_pos)
+            if dist_to_safe < 1.0:  # Within 1m of pickup/base center
                 at_safe_zone = True
                 platform_surface_height = PLATFORM_HEIGHT
 
@@ -847,6 +852,8 @@ class DroneEnv(gym.Env):
                 # Update target to base for return trip
                 self.target_position = self.base_position.copy()
                 self.target_position[2] = 1.0  # Fly at 1m altitude
+                # Reset progress tracking for return trip
+                self._prev_dist_to_base = None
 
         # === RELOAD AT BASE ===
         if self.route_phase == "return":
@@ -871,6 +878,8 @@ class DroneEnv(gym.Env):
             self.route_phase = "outbound"
             self.target_position = self.dropzone_position.copy()
             self.target_position[2] = 1.5  # Higher altitude for dropping
+            # Reset progress tracking for new outbound trip
+            self._prev_dist_to_dropzone = None
 
         return reward
 

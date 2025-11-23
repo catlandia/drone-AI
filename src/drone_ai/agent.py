@@ -156,8 +156,8 @@ class ActorCritic(nn.Module):
             action = dist.sample()
             log_prob = dist.log_prob(action).sum(dim=-1)
 
-        # Clip action to valid range
-        action = torch.clamp(action, 0, 1)
+        # Clip action to valid range (reversible motors use [-1, 1])
+        action = torch.clamp(action, -1, 1)
 
         return action, log_prob, value.squeeze(-1)
 

@@ -245,6 +245,9 @@ class LearningSequence:
                     shared_base = envs[0].base_position.copy() if hasattr(envs[0], 'base_position') else None
                     drone_alive[0] = True
 
+                    # Reset rewards so negative death scores don't carry over
+                    drone_rewards = [0.0] * self.population_size
+
                     for i in range(1, self.population_size):
                         # Reset first, then override positions
                         observations[i], _ = envs[i].reset(seed=reset_seed)

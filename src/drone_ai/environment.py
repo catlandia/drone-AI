@@ -754,8 +754,10 @@ class DroneEnv(gym.Env):
         if self.route_phase == "outbound" and pkg is not None:
             dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
             # Delta-based reward: reward for reducing distance since last step
-            if self._prev_dist_to_dropzone is not None:
-                distance_reduced = self._prev_dist_to_dropzone - dist_to_dropzone
+            # Use getattr to safely handle case where attribute doesn't exist
+            prev_dist = getattr(self, '_prev_dist_to_dropzone', None)
+            if prev_dist is not None:
+                distance_reduced = prev_dist - dist_to_dropzone
                 if distance_reduced > 0:
                     reward += weights['route_progress'] * distance_reduced * 10  # Scale up small deltas
             self._prev_dist_to_dropzone = dist_to_dropzone
@@ -763,8 +765,9 @@ class DroneEnv(gym.Env):
         elif self.route_phase == "return":
             dist_to_base = np.linalg.norm(state.position[:2] - self.base_position[:2])
             # Delta-based reward: reward for reducing distance since last step
-            if self._prev_dist_to_base is not None:
-                distance_reduced = self._prev_dist_to_base - dist_to_base
+            prev_dist = getattr(self, '_prev_dist_to_base', None)
+            if prev_dist is not None:
+                distance_reduced = prev_dist - dist_to_base
                 if distance_reduced > 0:
                     reward += weights['route_progress'] * distance_reduced * 10
             self._prev_dist_to_base = dist_to_base

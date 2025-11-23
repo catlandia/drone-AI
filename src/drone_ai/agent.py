@@ -34,9 +34,9 @@ class PPOConfig:
     gae_lambda: float = 0.95  # GAE parameter
     clip_epsilon: float = 0.2  # PPO clipping parameter
     value_clip: float = 0.2  # Value function clipping
-    entropy_coef: float = 0.01  # Entropy bonus coefficient
+    entropy_coef: float = 0.02  # Entropy bonus coefficient (increased for exploration)
     value_coef: float = 0.5  # Value loss coefficient
-    max_grad_norm: float = 0.5  # Gradient clipping
+    max_grad_norm: float = 1.0  # Gradient clipping (increased for stability)
 
     # Training parameters
     n_steps: int = 2048  # Steps per environment per update
@@ -47,7 +47,7 @@ class PPOConfig:
     # Action space
     action_std_init: float = 0.5  # Initial action standard deviation
     action_std_min: float = 0.1  # Minimum action standard deviation
-    action_std_decay: float = 0.99  # Std decay per update
+    action_std_decay: float = 0.95  # Std decay per update (faster convergence)
 
 
 class ActorCritic(nn.Module):

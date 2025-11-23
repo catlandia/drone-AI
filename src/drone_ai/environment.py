@@ -158,6 +158,8 @@ class DroneEnv(gym.Env):
         self.deliveries_successful = 0
         self.route_phase = "outbound"  # "outbound", "dropping", "return", "reload"
         self.route_score = 0.0  # Cumulative score for the route
+        self._prev_dist_to_dropzone = None  # For delta-based progress reward
+        self._prev_dist_to_base = None
 
         # Waypoints for varied routes (not just straight lines)
         self.route_waypoints: List[np.ndarray] = []
@@ -193,6 +195,8 @@ class DroneEnv(gym.Env):
             # === TERMINAL PENALTIES ===
             'crash': -10.0,               # Crash penalty (reduced from -50)
             'upside_down': -2.0,          # Upside down penalty (reduced from -15)
+            'extreme_velocity': -3.0,     # Penalty for going too fast (>20 m/s)
+            'extreme_spin': -3.0,         # Penalty for spinning too fast (>50 rad/s)
             'success': 1.0,               # Extra bonus for perfect hover
 
             # === DELIVERY TASK REWARDS ===
@@ -226,6 +230,9 @@ class DroneEnv(gym.Env):
             'obstacle_proximity': -0.5,   # Penalty for being too close to obstacles
             'obstacle_collision': -100.0, # Heavy penalty for hitting obstacles
             'waypoint_reached': 5.0,      # Bonus for reaching waypoints
+
+            # Out of bounds penalty (prevents exploit of flying away)
+            'out_of_bounds': -5.0,        # Heavy per-step penalty for being out of bounds
         }
 
         # Track timing for speed rewards
@@ -291,6 +298,8 @@ class DroneEnv(gym.Env):
             self.route_score = 0.0
             self.pickup_step = 0  # Start timing from beginning
             self.current_waypoint_idx = 0
+            self._prev_dist_to_dropzone = None  # Reset progress tracking
+            self._prev_dist_to_base = None
         else:
             self.sim.reset(
                 position=init_position,
@@ -330,6 +339,9 @@ class DroneEnv(gym.Env):
         else:
             self.sim.step(action[:4])  # Only use motor commands
 
+        # NO CRASH RESETS - drone cannot die or reset, must fly properly
+        # Bad behaviors get continuous penalties in _compute_reward()
+
         # Record position for trajectory visualization
         self.position_history.append(self.sim.state.position.copy())
 
@@ -337,7 +349,7 @@ class DroneEnv(gym.Env):
         reward = self._compute_reward(action)
         self.episode_reward += reward
 
-        # Check termination conditions
+        # Check termination conditions (crashes no longer terminate!)
         terminated = self._check_terminated()
         truncated = self.step_count >= self.max_steps
 
@@ -391,14 +403,14 @@ class DroneEnv(gym.Env):
         ]
 
         # Extended observations (11 dims) - filled based on task type
-        # Default values for non-delivery tasks
-        pkg_status = np.array([0.0])
+        # Default values for non-delivery tasks (use -1.0 to distinguish from valid values)
+        pkg_status = np.array([-1.0])  # -1 = not applicable (valid range: 0-1)
         has_package = np.array([0.0])
         location1_rel = np.zeros(3)  # pickup/base position relative
         location2_rel = np.zeros(3)  # dropzone position relative
         deliveries_norm = np.array([0.0])
-        drop_prediction = np.array([2.0])  # No package/not applicable
-        obstacle_proximity = np.array([1.0])  # No obstacles
+        drop_prediction = np.array([-1.0])  # -1 = not applicable (valid range: 0-2)
+        obstacle_proximity = np.array([-1.0])  # -1 = no obstacles (valid range: 0-1)
 
         # Fill in delivery-specific observations
         if self.task == TaskType.DELIVERY:
@@ -458,6 +470,9 @@ class DroneEnv(gym.Env):
         ])
 
         observation = np.concatenate(base_obs).astype(np.float32)
+
+        # Clip observations to prevent extreme values that destabilize training
+        observation = np.clip(observation, -10.0, 10.0)
 
         return observation
 
@@ -523,11 +538,20 @@ class DroneEnv(gym.Env):
             tilt_penalty = min(tilt - 0.3, 1.0) * weights['orientation']
             reward -= tilt_penalty  # Max -0.1
 
-        # Angular velocity penalty (only if spinning fast)
-        ang_vel = np.linalg.norm(state.angular_velocity)
-        if ang_vel > 1.0:
-            ang_penalty = min(ang_vel - 1.0, 2.0) * weights['angular_velocity']
-            reward -= ang_penalty  # Max -0.1
+        # Angular velocity penalty - penalize ANY spinning, especially yaw
+        ang_vel = state.angular_velocity
+        yaw_rate = abs(ang_vel[2])  # Z-axis rotation
+        roll_pitch_rate = np.linalg.norm(ang_vel[:2])  # X and Y axis rotation
+
+        # Penalize yaw rate strongly (drone shouldn't spin on its own)
+        if yaw_rate > 0.1:
+            yaw_penalty = min(yaw_rate, 3.0) * weights['angular_velocity'] * 2
+            reward -= yaw_penalty
+
+        # Penalize roll/pitch rate
+        if roll_pitch_rate > 0.5:
+            rp_penalty = min(roll_pitch_rate - 0.5, 2.0) * weights['angular_velocity']
+            reward -= rp_penalty
 
         # Action smoothness (only penalize large changes)
         motor_action = action[:4]
@@ -542,14 +566,52 @@ class DroneEnv(gym.Env):
         if pos_error < hover_zone_radius * 0.5 and velocity < 0.3 and tilt < 0.1:
             reward += weights['success']  # +1.0 for perfect hover
 
-        # === TERMINAL PENALTIES ===
-        if self.sim.is_crashed():
-            reward += weights['crash']  # -10.0 for crash
+        # === COLLISION PENALTIES (no death, just penalty) ===
+        # Ground collision penalty (except at safe zones like dropzone/pickup)
+        if state.position[2] < 0.05:
+            # Check if at safe zone (purple dropzone pad or pickup zone)
+            at_safe_zone = False
+            if self.task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
+                # Dropzone is safe - purple pad
+                dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
+                if dist_to_dropzone < 1.0:  # Within 1m of dropzone center
+                    at_safe_zone = True
+                # Pickup zone is also safe
+                dist_to_pickup = np.linalg.norm(state.position[:2] - self.pickup_position[:2])
+                if dist_to_pickup < 1.0:  # Within 1m of pickup center
+                    at_safe_zone = True
+
+            if not at_safe_zone:
+                reward += weights['crash']  # -10.0 for hitting ground outside safe zones
+
+        # Obstacle collision penalty
+        if self.sim.check_obstacle_collision():
+            reward += weights['obstacle_collision']  # -100.0 for hitting obstacle
 
         # Upside-down penalty (severe tilt > 60 degrees)
         tilt_threshold = np.pi / 3  # 60 degrees
         if abs(euler[0]) > tilt_threshold or abs(euler[1]) > tilt_threshold:
             reward += weights['upside_down']  # -2.0 for being upside down
+
+        # Extreme velocity penalty (prevents exploit - penalize but don't terminate)
+        speed = np.linalg.norm(state.velocity)
+        if speed > 20.0:  # Going faster than 20 m/s
+            reward += weights['extreme_velocity']  # -3.0 per step
+
+        # Extreme spin penalty (prevents exploit - penalize but don't terminate)
+        spin = np.linalg.norm(state.angular_velocity)
+        if spin > 50.0:  # Spinning faster than 50 rad/s
+            reward += weights['extreme_spin']  # -3.0 per step
+
+        # Out of bounds penalty (prevents exploit of flying away to lock in rewards)
+        position = state.position
+        if self.task == TaskType.DELIVERY_ROUTE:
+            max_dist = self.route_distance * 1.5
+            if np.any(np.abs(position[:2]) > max_dist) or position[2] > 50 or position[2] < -0.5:
+                reward += weights['out_of_bounds']  # -5.0 per step out of bounds
+        else:
+            if np.any(np.abs(position[:2]) > 10) or position[2] > 20 or position[2] < -0.5:
+                reward += weights['out_of_bounds']  # -5.0 per step out of bounds
 
         # === DELIVERY-SPECIFIC REWARDS ===
         if self.task == TaskType.DELIVERY:
@@ -676,18 +738,24 @@ class DroneEnv(gym.Env):
         pkg = self.sim.get_package_state()
         state = self.sim.state
 
-        # === PROGRESS REWARD (small continuous reward for moving toward target) ===
+        # === PROGRESS REWARD (reward for moving TOWARD target, not just being close) ===
         if self.route_phase == "outbound" and pkg is not None:
             dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
-            # Reward for getting closer to dropzone
-            progress = self.route_distance - dist_to_dropzone
-            reward += weights['route_progress'] * max(0, progress)
+            # Delta-based reward: reward for reducing distance since last step
+            if hasattr(self, '_prev_dist_to_dropzone'):
+                distance_reduced = self._prev_dist_to_dropzone - dist_to_dropzone
+                if distance_reduced > 0:
+                    reward += weights['route_progress'] * distance_reduced * 10  # Scale up small deltas
+            self._prev_dist_to_dropzone = dist_to_dropzone
 
         elif self.route_phase == "return":
             dist_to_base = np.linalg.norm(state.position[:2] - self.base_position[:2])
-            # Reward for getting closer to base
-            progress = self.route_distance - dist_to_base
-            reward += weights['route_progress'] * max(0, progress)
+            # Delta-based reward: reward for reducing distance since last step
+            if hasattr(self, '_prev_dist_to_base'):
+                distance_reduced = self._prev_dist_to_base - dist_to_base
+                if distance_reduced > 0:
+                    reward += weights['route_progress'] * distance_reduced * 10
+            self._prev_dist_to_base = dist_to_base
 
         # === WAYPOINT NAVIGATION ===
         if self.route_phase == "outbound" and self.route_waypoints:
@@ -748,12 +816,14 @@ class DroneEnv(gym.Env):
                         self.deliveries_successful += 1
                         self.route_score += 100 + accuracy_bonus
                     else:
-                        # MISSED: Outside 5m - penalty
-                        reward += weights['route_missed']
-                        # Extra penalty based on how far outside
+                        # MISSED: Outside 5m - heavy penalty for wrong drop
+                        reward += weights['route_missed']  # -80 base penalty
+                        # Extra penalty based on how far outside - scales harshly
                         overshoot = accuracy - self.drop_accuracy_radius
-                        reward -= min(30, overshoot * 2)
-                        self.route_score -= 50
+                        # Quadratic penalty for very wrong drops
+                        wrong_drop_penalty = min(100, overshoot * overshoot)
+                        reward -= wrong_drop_penalty
+                        self.route_score -= 50 + wrong_drop_penalty
 
                 self.deliveries_completed += 1
                 self.route_phase = "return"
@@ -790,40 +860,20 @@ class DroneEnv(gym.Env):
         return reward
 
     def _check_terminated(self) -> bool:
-        """Check if episode should terminate."""
-        # Crash detection
-        if self.sim.is_crashed():
-            return True
+        """Check if episode should terminate.
 
-        position = self.sim.state.position
+        IMPORTANT: Crashes NO LONGER terminate! This prevents AI from exploiting
+        death to lock in rewards. Crashes just reset position with penalty.
+        Only legitimate task completion ends the episode.
+        """
+        # CRASHES DO NOT TERMINATE - handled in step() with position reset
 
-        # NOTE: Upside-down no longer causes termination - just penalty in reward function
-        # This allows drones to learn to recover from bad orientations
-
-        # Stuck on ground too long - drone should take off
-        # After 200 steps (~4 seconds), if still on ground, terminate
-        on_ground = position[2] < 0.3
-        if on_ground and self.step_count > 200:
-            return True
-
-        # Out of bounds - expanded for long-range routes
-        if self.task == TaskType.DELIVERY_ROUTE:
-            # Much larger bounds for long-range delivery
-            max_dist = self.route_distance * 1.5
-            if np.any(np.abs(position[:2]) > max_dist) or position[2] > 50:
-                return True
-        else:
-            if np.any(np.abs(position[:2]) > 10) or position[2] > 20:
-                return True
-
-        # Delivery task termination
+        # Delivery task - terminate only when package is delivered or missed
         if self.task == TaskType.DELIVERY:
             if self.sim.is_package_delivered() or self.sim.is_package_missed():
                 return True
 
-        # Delivery route doesn't terminate on single delivery - it continues
-        # Terminate only on crash, out of bounds, or max steps
-
+        # All other tasks run until max_steps (truncation)
         return False
 
     def _setup_task(self):

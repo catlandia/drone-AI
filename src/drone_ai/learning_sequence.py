@@ -149,6 +149,19 @@ class LearningSequence:
         print(f"  Domain Randomization: {'ON' if domain_rand else 'OFF'}")
         print(f"{'='*60}")
 
+        # Adjust learning rate based on stage (higher for early stages, lower for later)
+        stage_lr = {
+            "Hover": 5e-4,           # Learn fast for simple task
+            "Delivery": 3e-4,        # Standard LR
+            "Delivery Route": 1e-4,  # Lower LR for complex task
+            "Deployment Ready": 5e-5 # Fine-tuning LR
+        }
+        lr = stage_lr.get(stage_name, 3e-4)
+        for agent in self.population:
+            for param_group in agent.optimizer.param_groups:
+                param_group['lr'] = lr
+        print(f"  Learning Rate: {lr}")
+
         # Create environments
         envs = []
         for i in range(self.population_size):

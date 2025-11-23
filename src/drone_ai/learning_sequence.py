@@ -225,7 +225,8 @@ class LearningSequence:
                 observations.append(obs)
 
             drone_alive = [True] * self.population_size
-            drone_rewards = [0.0] * self.population_size
+            drone_rewards = [0.0] * self.population_size  # Current episode rewards
+            age_total_rewards = [0.0] * self.population_size  # Cumulative rewards for entire age
             steps_since_update = [0] * self.population_size
 
             pbar = tqdm(total=self.args.steps_per_age, desc=f"  Training", leave=False)
@@ -257,6 +258,8 @@ class LearningSequence:
 
                     if done:
                         drone_alive[i] = False
+                        # Add episode rewards to age total when episode ends
+                        age_total_rewards[i] += drone_rewards[i]
                     else:
                         observations[i] = next_obs
 
@@ -275,7 +278,7 @@ class LearningSequence:
                     shared_base = envs[0].base_position.copy() if hasattr(envs[0], 'base_position') else None
                     drone_alive[0] = True
 
-                    # Reset rewards so negative death scores don't carry over
+                    # Reset ONLY current episode rewards (age_total_rewards keeps accumulating)
                     drone_rewards = [0.0] * self.population_size
 
                     for i in range(1, self.population_size):
@@ -314,8 +317,10 @@ class LearningSequence:
                         # Get package for delivery visualization
                         package = envs[0].sim.package if hasattr(envs[0].sim, 'package') else None
 
-                        # Calculate mean reward across all drones
-                        mean_reward = sum(drone_rewards) / max(1, len(drone_rewards))
+                        # Calculate mean reward across all drones (cumulative for age)
+                        current_totals = [age_total_rewards[i] + (drone_rewards[i] if drone_alive[i] else 0)
+                                          for i in range(self.population_size)]
+                        mean_reward = sum(current_totals) / max(1, len(current_totals))
 
                         self.renderer.render(
                             state=state,
@@ -328,7 +333,7 @@ class LearningSequence:
                                 'age': age + 1,
                                 'alive': alive_count,
                                 'episodes': age + 1,
-                                'episode_reward': drone_rewards[0],
+                                'episode_reward': current_totals[0],
                                 'mean_reward': mean_reward
                             },
                             additional_states=additional_states
@@ -340,16 +345,21 @@ class LearningSequence:
 
             pbar.close()
 
-            # Accumulate rewards
+            # Add remaining rewards from drones still alive at end of age
             for i in range(self.population_size):
-                total_rewards[i] += drone_rewards[i]
+                if drone_alive[i]:
+                    age_total_rewards[i] += drone_rewards[i]
 
-            # Selection at end of age
+            # Accumulate age rewards into total rewards
+            for i in range(self.population_size):
+                total_rewards[i] += age_total_rewards[i]
+
+            # Selection at end of age (use age_total_rewards for proper selection)
             if age < self.args.ages_per_stage - 1:
-                self._select_and_mutate(drone_rewards)
+                self._select_and_mutate(age_total_rewards)
 
-            best_idx = np.argmax(drone_rewards)
-            print(f"    Best: Drone #{best_idx + 1} with {drone_rewards[best_idx]:.1f}")
+            best_idx = np.argmax(age_total_rewards)
+            print(f"    Best: Drone #{best_idx + 1} with {age_total_rewards[best_idx]:.1f}")
 
         return total_rewards
 

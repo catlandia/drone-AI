@@ -11,6 +11,12 @@ After all stages, the best 2 drones repeat the process.
 Finally, the best drone is saved with a score and grade.
 """
 
+# Suppress warnings before importing libraries
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='gymnasium')
+warnings.filterwarnings('ignore', category=UserWarning, module='pygame')
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
+
 import argparse
 import json
 import copy

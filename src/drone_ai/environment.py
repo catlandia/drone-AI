@@ -111,15 +111,15 @@ class DroneEnv(gym.Env):
         if task in [TaskType.DELIVERY, TaskType.DELIVERY_ROUTE]:
             # 4 motor commands [-1, 1] + 1 drop signal [0, 1]
             self.action_space = spaces.Box(
-                low=np.array([-1.0, -1.0, -1.0, -1.0, 0.0]),
-                high=np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
+                low=np.array([-1.0, -1.0, -1.0, -1.0, 0.0], dtype=np.float32),
+                high=np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
                 dtype=np.float32
             )
         else:
             # 4 motor commands [-1, 1] for reversible fans
             self.action_space = spaces.Box(
-                low=-1.0,
-                high=1.0,
+                low=np.float32(-1.0),
+                high=np.float32(1.0),
                 shape=(4,),
                 dtype=np.float32
             )

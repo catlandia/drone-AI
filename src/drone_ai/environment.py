@@ -335,6 +335,16 @@ class DroneEnv(gym.Env):
         else:
             self.sim.step(action[:4])  # Only use motor commands
 
+        # Check for crash and reset position (NO TERMINATION - prevents exploit)
+        if self.sim.is_crashed():
+            # Reset drone to safe hover position - don't end episode
+            self.sim.state.position = self.target_position.copy()
+            self.sim.state.position[2] = max(1.0, self.target_position[2])
+            self.sim.state.velocity = np.zeros(3)
+            self.sim.state.angular_velocity = np.zeros(3)
+            self.sim.state.orientation = np.array([1.0, 0.0, 0.0, 0.0])  # Level
+            self.sim._obstacle_collision = False  # Reset collision flag
+
         # Record position for trajectory visualization
         self.position_history.append(self.sim.state.position.copy())
 
@@ -342,7 +352,7 @@ class DroneEnv(gym.Env):
         reward = self._compute_reward(action)
         self.episode_reward += reward
 
-        # Check termination conditions
+        # Check termination conditions (crashes no longer terminate!)
         terminated = self._check_terminated()
         truncated = self.step_count >= self.max_steps
 
@@ -817,23 +827,18 @@ class DroneEnv(gym.Env):
     def _check_terminated(self) -> bool:
         """Check if episode should terminate.
 
-        Only terminates on ACTUAL crashes (collision with ground/obstacles/extreme velocity),
-        not soft conditions like out-of-bounds or stuck on ground. This prevents
-        the AI from exploiting soft deaths to lock in rewards while doing nothing.
+        IMPORTANT: Crashes NO LONGER terminate! This prevents AI from exploiting
+        death to lock in rewards. Crashes just reset position with penalty.
+        Only legitimate task completion ends the episode.
         """
-        # Only terminate on actual crash (ground collision, obstacle hit, extreme velocity)
-        if self.sim.is_crashed():
-            return True
+        # CRASHES DO NOT TERMINATE - handled in step() with position reset
 
-        # Delivery task - terminate when package is delivered or missed (legitimate end)
+        # Delivery task - terminate only when package is delivered or missed
         if self.task == TaskType.DELIVERY:
             if self.sim.is_package_delivered() or self.sim.is_package_missed():
                 return True
 
-        # NOTE: Out-of-bounds and stuck-on-ground no longer terminate.
-        # These conditions get penalties in _compute_reward() instead,
-        # so the drone is punished but can't exploit dying to lock in rewards.
-
+        # All other tasks run until max_steps (truncation)
         return False
 
     def _setup_task(self):

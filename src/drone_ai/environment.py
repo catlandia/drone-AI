@@ -794,12 +794,14 @@ class DroneEnv(gym.Env):
                         self.deliveries_successful += 1
                         self.route_score += 100 + accuracy_bonus
                     else:
-                        # MISSED: Outside 5m - penalty
-                        reward += weights['route_missed']
-                        # Extra penalty based on how far outside
+                        # MISSED: Outside 5m - heavy penalty for wrong drop
+                        reward += weights['route_missed']  # -80 base penalty
+                        # Extra penalty based on how far outside - scales harshly
                         overshoot = accuracy - self.drop_accuracy_radius
-                        reward -= min(30, overshoot * 2)
-                        self.route_score -= 50
+                        # Quadratic penalty for very wrong drops
+                        wrong_drop_penalty = min(100, overshoot * overshoot)
+                        reward -= wrong_drop_penalty
+                        self.route_score -= 50 + wrong_drop_penalty
 
                 self.deliveries_completed += 1
                 self.route_phase = "return"

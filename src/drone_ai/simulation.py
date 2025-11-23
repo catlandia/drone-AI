@@ -560,27 +560,13 @@ class DroneSimulation:
         return self.state.copy()
 
     def is_crashed(self) -> bool:
-        """Check if the drone has crashed into something.
+        """Check if the drone has crashed.
 
-        Only returns True for ACTUAL collisions, not self-induced states.
-        This prevents AI from exploiting self-termination to lock in rewards.
+        DISABLED: Always returns False to prevent ANY death exploit.
+        Bad behaviors are penalized in reward function instead.
+        The drone cannot die - it must learn to fly properly.
         """
-        # Check obstacle collision - actual external collision
-        obstacle_hit = self._obstacle_collision or self.check_obstacle_collision()
-        if obstacle_hit:
-            return True
-
-        # Check ground collision - must have significant DOWNWARD velocity
-        # This prevents exploit of just tilting on ground to die
-        on_ground = self.state.position[2] < 0.05
-        downward_velocity = self.state.velocity[2] < -2.0  # Falling at >2 m/s
-
-        if on_ground and downward_velocity:
-            return True  # Actual impact with ground
-
-        # High velocity and spin are now just penalized in reward, not terminal
-        # This prevents AI from deliberately spinning/speeding to die
-
+        # ALL CRASH DETECTION DISABLED - no death, no exploits
         return False
 
     def check_obstacle_collision(self) -> bool:

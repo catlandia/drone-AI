@@ -335,15 +335,8 @@ class DroneEnv(gym.Env):
         else:
             self.sim.step(action[:4])  # Only use motor commands
 
-        # Check for crash and reset position (NO TERMINATION - prevents exploit)
-        if self.sim.is_crashed():
-            # Reset drone to safe hover position - don't end episode
-            self.sim.state.position = self.target_position.copy()
-            self.sim.state.position[2] = max(1.0, self.target_position[2])
-            self.sim.state.velocity = np.zeros(3)
-            self.sim.state.angular_velocity = np.zeros(3)
-            self.sim.state.orientation = np.array([1.0, 0.0, 0.0, 0.0])  # Level
-            self.sim._obstacle_collision = False  # Reset collision flag
+        # NO CRASH RESETS - drone cannot die or reset, must fly properly
+        # Bad behaviors get continuous penalties in _compute_reward()
 
         # Record position for trajectory visualization
         self.position_history.append(self.sim.state.position.copy())
@@ -557,9 +550,14 @@ class DroneEnv(gym.Env):
         if pos_error < hover_zone_radius * 0.5 and velocity < 0.3 and tilt < 0.1:
             reward += weights['success']  # +1.0 for perfect hover
 
-        # === TERMINAL PENALTIES ===
-        if self.sim.is_crashed():
-            reward += weights['crash']  # -10.0 for crash
+        # === COLLISION PENALTIES (no death, just penalty) ===
+        # Ground collision penalty
+        if state.position[2] < 0.05:
+            reward += weights['crash']  # -10.0 for hitting ground
+
+        # Obstacle collision penalty
+        if self.sim.check_obstacle_collision():
+            reward += weights['obstacle_collision']  # -100.0 for hitting obstacle
 
         # Upside-down penalty (severe tilt > 60 degrees)
         tilt_threshold = np.pi / 3  # 60 degrees

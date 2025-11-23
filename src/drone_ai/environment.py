@@ -158,6 +158,8 @@ class DroneEnv(gym.Env):
         self.deliveries_successful = 0
         self.route_phase = "outbound"  # "outbound", "dropping", "return", "reload"
         self.route_score = 0.0  # Cumulative score for the route
+        self._prev_dist_to_dropzone = None  # For delta-based progress reward
+        self._prev_dist_to_base = None
 
         # Waypoints for varied routes (not just straight lines)
         self.route_waypoints: List[np.ndarray] = []
@@ -296,6 +298,8 @@ class DroneEnv(gym.Env):
             self.route_score = 0.0
             self.pickup_step = 0  # Start timing from beginning
             self.current_waypoint_idx = 0
+            self._prev_dist_to_dropzone = None  # Reset progress tracking
+            self._prev_dist_to_base = None
         else:
             self.sim.reset(
                 position=init_position,
@@ -399,14 +403,14 @@ class DroneEnv(gym.Env):
         ]
 
         # Extended observations (11 dims) - filled based on task type
-        # Default values for non-delivery tasks
-        pkg_status = np.array([0.0])
+        # Default values for non-delivery tasks (use -1.0 to distinguish from valid values)
+        pkg_status = np.array([-1.0])  # -1 = not applicable (valid range: 0-1)
         has_package = np.array([0.0])
         location1_rel = np.zeros(3)  # pickup/base position relative
         location2_rel = np.zeros(3)  # dropzone position relative
         deliveries_norm = np.array([0.0])
-        drop_prediction = np.array([2.0])  # No package/not applicable
-        obstacle_proximity = np.array([1.0])  # No obstacles
+        drop_prediction = np.array([-1.0])  # -1 = not applicable (valid range: 0-2)
+        obstacle_proximity = np.array([-1.0])  # -1 = no obstacles (valid range: 0-1)
 
         # Fill in delivery-specific observations
         if self.task == TaskType.DELIVERY:
@@ -466,6 +470,9 @@ class DroneEnv(gym.Env):
         ])
 
         observation = np.concatenate(base_obs).astype(np.float32)
+
+        # Clip observations to prevent extreme values that destabilize training
+        observation = np.clip(observation, -10.0, 10.0)
 
         return observation
 
@@ -722,18 +729,24 @@ class DroneEnv(gym.Env):
         pkg = self.sim.get_package_state()
         state = self.sim.state
 
-        # === PROGRESS REWARD (small continuous reward for moving toward target) ===
+        # === PROGRESS REWARD (reward for moving TOWARD target, not just being close) ===
         if self.route_phase == "outbound" and pkg is not None:
             dist_to_dropzone = np.linalg.norm(state.position[:2] - self.dropzone_position[:2])
-            # Reward for getting closer to dropzone
-            progress = self.route_distance - dist_to_dropzone
-            reward += weights['route_progress'] * max(0, progress)
+            # Delta-based reward: reward for reducing distance since last step
+            if hasattr(self, '_prev_dist_to_dropzone'):
+                distance_reduced = self._prev_dist_to_dropzone - dist_to_dropzone
+                if distance_reduced > 0:
+                    reward += weights['route_progress'] * distance_reduced * 10  # Scale up small deltas
+            self._prev_dist_to_dropzone = dist_to_dropzone
 
         elif self.route_phase == "return":
             dist_to_base = np.linalg.norm(state.position[:2] - self.base_position[:2])
-            # Reward for getting closer to base
-            progress = self.route_distance - dist_to_base
-            reward += weights['route_progress'] * max(0, progress)
+            # Delta-based reward: reward for reducing distance since last step
+            if hasattr(self, '_prev_dist_to_base'):
+                distance_reduced = self._prev_dist_to_base - dist_to_base
+                if distance_reduced > 0:
+                    reward += weights['route_progress'] * distance_reduced * 10
+            self._prev_dist_to_base = dist_to_base
 
         # === WAYPOINT NAVIGATION ===
         if self.route_phase == "outbound" and self.route_waypoints:
